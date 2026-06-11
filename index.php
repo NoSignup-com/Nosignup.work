@@ -1,3 +1,279 @@
+<?php
+/* ============================================================
+   NOSIGNUP.WORK — single-file stateless job/resume exchange.
+   API: index.php?api=jobs|resumes|post_job|post_resume|serve_pdf
+   Everything else falls through to the HTML/CSS/JS front-end below.
+
+   STORAGE IS DROP-IN PORTABLE. Resolution order (first writable wins):
+     1. env NSW_DATA_DIR (set this on a real host to live outside webroot)
+     2. /var/lib/nosignup/work        (README default; Linux w/ access)
+     3. <dir-of-index.php>/.nsw-data   (works literally anywhere)
+   A protective .htaccess + index guard is dropped into the data dir so
+   the JSON/PDF shards are not directly web-readable on Apache. On nginx,
+   set NSW_DATA_DIR to a path outside your webroot.
+   ============================================================ */
+define('NSW_MAX_POSTS_HOUR', 5);
+define('NSW_EXPIRY_SEC',     90 * 86400);
+define('NSW_PAGE_SIZE',      10);
+define('NSW_MAX_PDF',        2 * 1024 * 1024);
+
+/* ---- portable base-directory resolution (cached) ---- */
+function nsw_base() {
+    static $base = null;
+    if ($base !== null) return $base;
+    $candidates = [];
+    if (getenv('NSW_DATA_DIR')) $candidates[] = rtrim(getenv('NSW_DATA_DIR'), "/\\");
+    $candidates[] = '/var/lib/nosignup/work';
+    $candidates[] = __DIR__ . DIRECTORY_SEPARATOR . '.nsw-data';
+    foreach ($candidates as $c) {
+        if ((is_dir($c) && is_writable($c)) || @mkdir($c, 0755, true) || is_dir($c)) {
+            // best-effort: keep shards out of the browser on Apache hosts
+            if (!file_exists("$c/.htaccess")) @file_put_contents("$c/.htaccess", "Require all denied\nDeny from all\n");
+            if (!file_exists("$c/index.html")) @file_put_contents("$c/index.html", "");
+            $base = $c;
+            return $base;
+        }
+    }
+    // last resort: system temp (non-persistent, but never fatal)
+    $base = rtrim(sys_get_temp_dir(), "/\\") . DIRECTORY_SEPARATOR . 'nsw-data';
+    @mkdir($base, 0755, true);
+    return $base;
+}
+function nsw_shards()    { return nsw_base() . DIRECTORY_SEPARATOR . 'shards'; }
+function nsw_ratedir()   {
+    // prefer a RAM disk when present (POSIX /dev/shm); else live under the data dir.
+    // Guard on DIRECTORY_SEPARATOR so Windows doesn't fabricate a bogus C:\dev\shm.
+    if (DIRECTORY_SEPARATOR === '/' && is_dir('/dev/shm') && is_writable('/dev/shm')) {
+        $d = '/dev/shm/nosignup_work_ip';
+        if ((is_dir($d) || @mkdir($d, 0700, true)) && is_writable($d)) return $d;
+    }
+    return nsw_base() . DIRECTORY_SEPARATOR . 'ip_posts';
+}
+/* The aggregate shard that makes remote listings visible from any search. */
+define('NSW_REMOTE_TILE', '_remote');
+
+function nsw_json_out($data, $code = 200) {
+    http_response_code($code);
+    header('Content-Type: application/json; charset=utf-8');
+    header('X-NSW-Backend: file-shard');           // verbose diagnostics (README §0/§1)
+    header('X-NSW-Data-Dir: ' . nsw_base());
+    echo json_encode($data);
+    exit;
+}
+function nsw_san($s, $max = 2000) {
+    return htmlspecialchars(substr(strip_tags(trim((string)($s ?? ''))), 0, $max), ENT_QUOTES, 'UTF-8');
+}
+function nsw_tile_ok($t) {
+    return $t && preg_match('/^-?\d{1,3}_-?\d{1,3}$/', $t);
+}
+function nsw_tiles($tile, $r) {
+    [$lat, $lon] = array_map('intval', explode('_', $tile));
+    $out = [];
+    for ($dy = -$r; $dy <= $r; $dy++)
+        for ($dx = -$r; $dx <= $r; $dx++)
+            $out[] = ($lat + $dy) . '_' . ($lon + $dx);
+    return $out;
+}
+function nsw_rate_ok($ip) {
+    $dir = nsw_ratedir();
+    if (!is_dir($dir)) @mkdir($dir, 0700, true);
+    $f   = $dir . DIRECTORY_SEPARATOR . md5($ip) . '.json';
+    $now = time();
+    $arr = is_file($f) ? (json_decode(@file_get_contents($f), true) ?: []) : [];
+    $arr = array_values(array_filter($arr, fn($t) => $now - $t < 3600));
+    if (count($arr) >= NSW_MAX_POSTS_HOUR) return false;
+    $arr[] = $now;
+    @file_put_contents($f, json_encode($arr), LOCK_EX);
+    return true;
+}
+function nsw_new_id($ip) {
+    return time() . '_' . sprintf('%08x', crc32($ip . microtime()));
+}
+function nsw_mkdir($path) {
+    if (!is_dir($path)) @mkdir($path, 0755, true);
+    return is_dir($path);
+}
+function nsw_expire($file) {
+    if (filemtime($file) < time() - NSW_EXPIRY_SEC) {
+        @unlink($file);
+        @unlink(preg_replace('/\.json$/', '.pdf', $file));
+        return true;
+    }
+    return false;
+}
+/* Store one listing JSON under a tile dir; also mirror remote ones into the
+   _remote aggregate so they surface in every remote-enabled search. */
+function nsw_store($type, $tile, $id, $data) {
+    $primary = nsw_shards() . "/$tile/$type/";
+    if (!nsw_mkdir($primary)) return false;
+    $ok = @file_put_contents($primary . $id . '.json', json_encode($data), LOCK_EX) !== false;
+    if ($ok && !empty($data['remote'])) {
+        $agg = nsw_shards() . '/' . NSW_REMOTE_TILE . "/$type/";
+        if (nsw_mkdir($agg)) @file_put_contents($agg . $id . '.json', json_encode($data), LOCK_EX);
+    }
+    return $ok;
+}
+function nsw_listings($type, $tile, $radius, $with_remote, $keyword, $page) {
+    $tiles = nsw_tiles($tile, $radius);
+    if ($with_remote) $tiles[] = NSW_REMOTE_TILE;     // pull in globally-remote listings
+    $all  = [];
+    $seen = [];
+    foreach ($tiles as $t) {
+        $dir = nsw_shards() . "/$t/$type/";
+        if (!is_dir($dir)) continue;
+        foreach (glob($dir . '*.json') ?: [] as $f) {
+            if (nsw_expire($f)) continue;
+            $d = json_decode(@file_get_contents($f), true);
+            if (!$d || !isset($d['id']) || isset($seen[$d['id']])) continue;
+            // in the _remote aggregate, every entry is by definition remote-eligible
+            if ($t !== NSW_REMOTE_TILE && $d['tile'] !== $t && !($with_remote && !empty($d['remote']))) continue;
+            if (!$with_remote && !empty($d['remote']) && $d['tile'] !== $t) continue;
+            $seen[$d['id']] = 1;
+            $all[] = $d;
+        }
+    }
+    if ($keyword !== '') {
+        $kw  = function_exists('mb_strtolower') ? mb_strtolower($keyword) : strtolower($keyword);
+        $low = fn($s) => function_exists('mb_strtolower') ? mb_strtolower((string)$s) : strtolower((string)$s);
+        $all = array_filter($all, fn($l)
+            => strpos($low($l['title']       ?? ''), $kw) !== false
+            || strpos($low(($l['description'] ?? '') . ' ' . ($l['resume_text'] ?? '')), $kw) !== false
+            || strpos($low($l['keywords']    ?? ''), $kw) !== false
+        );
+    }
+    usort($all, fn($a, $b) => ($b['timestamp'] ?? 0) <=> ($a['timestamp'] ?? 0));
+    $total = count($all);
+    return ['total' => $total, 'page' => $page, 'listings' => array_values(array_slice($all, $page * NSW_PAGE_SIZE, NSW_PAGE_SIZE))];
+}
+function nsw_is_pdf($tmp, $name) {
+    if (function_exists('finfo_open')) {
+        $fi = finfo_open(FILEINFO_MIME_TYPE);
+        $mime = finfo_file($fi, $tmp);
+        finfo_close($fi);
+        if ($mime === 'application/pdf') return true;
+    } elseif (function_exists('mime_content_type')) {
+        if (mime_content_type($tmp) === 'application/pdf') return true;
+    }
+    // fallback: extension + %PDF magic bytes
+    if (strtolower(substr($name, -4)) === '.pdf') {
+        $h = @file_get_contents($tmp, false, null, 0, 5);
+        return $h !== false && strncmp($h, '%PDF-', 5) === 0;
+    }
+    return false;
+}
+
+if (isset($_GET['api'])) {
+    $api = $_GET['api'];
+
+    /* --- GET jobs / resumes --- */
+    if ($api === 'jobs' || $api === 'resumes') {
+        $tile = $_GET['tile'] ?? '';
+        if (!nsw_tile_ok($tile)) nsw_json_out(['error' => 'bad tile'], 400);
+        $radius = max(1, min(7, (int)($_GET['radius'] ?? 1)));
+        $remote = !empty($_GET['remote']) && $_GET['remote'] !== '0';
+        $kw     = trim($_GET['keyword'] ?? '');
+        $page   = max(0, (int)($_GET['page'] ?? 0));
+        nsw_json_out(nsw_listings($api, $tile, $radius, $remote, $kw, $page));
+    }
+
+    /* --- POST job --- */
+    if ($api === 'post_job') {
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') nsw_json_out(['error' => 'POST only'], 405);
+        $ip = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
+        if (!nsw_rate_ok($ip)) nsw_json_out(['error' => 'rate limited (max 5/hr)'], 429);
+        $tile = $_POST['tile'] ?? '';
+        if (!nsw_tile_ok($tile)) nsw_json_out(['error' => 'bad tile'], 400);
+        $cats      = ['business_finance','administration','marketing_sales','engineering_technology','healthcare','education_training','construction_trades','arts','logistics_transportation','legal_government'];
+        $pay_types = ['remote_fixed','remote_hourly','inperson_fixed','inperson_hourly'];
+        $cat      = in_array($_POST['category'] ?? '', $cats, true)      ? $_POST['category'] : '';
+        $pay_type = in_array($_POST['pay_type'] ?? '', $pay_types, true) ? $_POST['pay_type'] : '';
+        if (!$cat || !$pay_type || empty($_POST['title']) || empty($_POST['details']))
+            nsw_json_out(['error' => 'missing required fields (category, pay_type, title, details)'], 400);
+        $id   = nsw_new_id($ip);
+        $remote = (!empty($_POST['remote']) && $_POST['remote'] !== '0') || strpos($pay_type, 'remote') === 0;
+        $data = [
+            'id'            => $id,
+            'tile'          => $tile,
+            'title'         => nsw_san($_POST['title'],      120),
+            'category'      => $cat,
+            'pay_type'      => $pay_type,
+            'pay_amount'    => nsw_san($_POST['pay_amount'] ?? '', 80),
+            'description'   => nsw_san($_POST['details'],    2000),
+            'contact_email' => nsw_san($_POST['email']   ?? '', 200),
+            'contact_phone' => nsw_san($_POST['phone']   ?? '', 40),
+            'keywords'      => nsw_san($_POST['keywords'] ?? '', 200),
+            'remote'        => $remote,
+            'timestamp'     => time(),
+        ];
+        if (!nsw_store('jobs', $tile, $id, $data)) nsw_json_out(['error' => 'storage not writable'], 500);
+        nsw_json_out(['ok' => true, 'id' => $id]);
+    }
+
+    /* --- POST resume --- */
+    if ($api === 'post_resume') {
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') nsw_json_out(['error' => 'POST only'], 405);
+        $ip = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
+        if (!nsw_rate_ok($ip)) nsw_json_out(['error' => 'rate limited (max 5/hr)'], 429);
+        $tile = $_POST['tile'] ?? '';
+        if (!nsw_tile_ok($tile)) nsw_json_out(['error' => 'bad tile'], 400);
+        if (empty($_POST['name']) || empty($_POST['email']))
+            nsw_json_out(['error' => 'missing required fields (name, email)'], 400);
+        $id  = nsw_new_id($ip);
+        $dir = nsw_shards() . "/$tile/resumes/";
+        if (!nsw_mkdir($dir)) nsw_json_out(['error' => 'storage not writable'], 500);
+        $pdf = null;
+        if (isset($_FILES['resume_pdf']) && $_FILES['resume_pdf']['error'] === UPLOAD_ERR_OK
+            && $_FILES['resume_pdf']['size'] > 0 && $_FILES['resume_pdf']['size'] <= NSW_MAX_PDF
+            && nsw_is_pdf($_FILES['resume_pdf']['tmp_name'], $_FILES['resume_pdf']['name'])) {
+            $dest = $dir . $id . '.pdf';
+            // is_uploaded_file/move_uploaded_file under real SAPI; copy fallback for CLI tests
+            if (is_uploaded_file($_FILES['resume_pdf']['tmp_name'])) {
+                if (move_uploaded_file($_FILES['resume_pdf']['tmp_name'], $dest)) $pdf = $id . '.pdf';
+            } elseif (@copy($_FILES['resume_pdf']['tmp_name'], $dest)) {
+                $pdf = $id . '.pdf';
+            }
+        }
+        $remote = !empty($_POST['remote']) && $_POST['remote'] !== '0';
+        $data = [
+            'id'          => $id,
+            'tile'        => $tile,
+            'name'        => nsw_san($_POST['name'],          120),
+            'email'       => nsw_san($_POST['email'],         200),
+            'phone'       => nsw_san($_POST['phone'] ?? '',    40),
+            'min_salary'  => nsw_san($_POST['min_salary'] ?? '', 80),
+            'keywords'    => nsw_san($_POST['keywords'] ?? '', 200),
+            'resume_text' => nsw_san($_POST['resume_text'] ?? '', 5000),
+            'pdf_path'    => $pdf,
+            'remote'      => $remote,
+            'timestamp'   => time(),
+        ];
+        if (!nsw_store('resumes', $tile, $id, $data)) nsw_json_out(['error' => 'storage not writable'], 500);
+        nsw_json_out(['ok' => true, 'id' => $id]);
+    }
+
+    /* --- serve PDF --- */
+    if ($api === 'serve_pdf') {
+        $tile = $_GET['tile'] ?? '';
+        $file = basename($_GET['file'] ?? '');
+        if (!nsw_tile_ok($tile) || !preg_match('/^\d+_[0-9a-f]+\.pdf$/', $file)) { http_response_code(400); exit; }
+        // check both the tile dir and the remote aggregate
+        $paths = [nsw_shards() . "/$tile/resumes/$file", nsw_shards() . '/' . NSW_REMOTE_TILE . "/resumes/$file"];
+        foreach ($paths as $path) {
+            if (is_file($path)) {
+                header('Content-Type: application/pdf');
+                header('Content-Disposition: inline; filename="resume.pdf"');
+                header('Content-Length: ' . filesize($path));
+                readfile($path);
+                exit;
+            }
+        }
+        http_response_code(404);
+        exit;
+    }
+
+    nsw_json_out(['error' => 'unknown api'], 400);
+}
+?>
 <!DOCTYPE html>
 <!--
 ================================================================================
@@ -100,8 +376,9 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
   flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:14px}
 .JobSectionTop{background:rgba(244,67,54,.14);border:1px solid rgba(244,67,54,.25)}
 .JobSectionTop h3{margin:0;font-size:clamp(20px,2.4vw,30px)}
+.JobSectionTop small{font-size:13px;color:var(--muted);margin-top:4px}
 .JobSectionMedium{flex:1;background:rgba(33,150,243,.12);border:1px solid rgba(33,150,243,.22);
-  font-size:clamp(15px,1.4vw,18px);line-height:1.5;color:#334}
+  font-size:clamp(15px,1.4vw,18px);line-height:1.5;color:#334;overflow-y:auto}
 .JobSectionBottom{background:rgba(76,175,80,.16);border:1px solid rgba(76,175,80,.28);gap:6px;
   font-size:clamp(15px,1.5vw,19px);font-weight:bold}
 
@@ -149,6 +426,7 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
 .row{display:flex;gap:10px}
 .row>*{flex:1}
 .JobDetailsTextarea{height:24vh;min-height:120px;resize:none}
+.ResumeTextarea{height:16vh;min-height:80px;resize:none}
 .UploadContainer{display:flex;align-items:center;justify-content:center;padding:8px;
   border:1px dashed var(--line);border-radius:12px}
 .ResumeInput{width:100%;font-size:14px}
@@ -170,6 +448,18 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
 .resume-details{background:rgba(76,175,80,.16);border:1px solid rgba(76,175,80,.28);
   border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:4px;font-size:15px}
 .detail-line{font-weight:bold}
+
+/* carousel empty / loading states */
+.carousel-msg{color:var(--muted);font-size:18px;padding:40px;text-align:center}
+.carousel-pager{position:absolute;bottom:14vh;left:50%;transform:translateX(-50%);
+  font-size:13px;color:var(--muted);background:#fff;border-radius:999px;padding:3px 14px;
+  border:1px solid var(--line);pointer-events:none}
+
+/* toast notifications */
+#nsw-toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);
+  background:#222;color:#fff;border-radius:12px;padding:12px 24px;font-size:15px;
+  z-index:9999;opacity:0;transition:opacity .25s;pointer-events:none}
+#nsw-toast.show{opacity:1}
 
 /* unified map overlay */
 .map-overlay{position:fixed;inset:0;z-index:2000;background:rgba(10,16,28,.9);
@@ -193,6 +483,9 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
 </head>
 <body>
 
+<!-- toast -->
+<div id="nsw-toast"></div>
+
 <!-- hidden toggles (must precede the elements they reveal) -->
 <input type="checkbox" id="toggleBrowseJobs"  class="button-toggle">
 <input type="checkbox" id="togglePostJobs"    class="button-toggle">
@@ -213,13 +506,10 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
   <label for="toggleBrowseJobs" class="close-button BrowseJobs"><span>Back</span></label>
   <div class="top-menu"><label for="toggleMapMenu" class="top-map-label">🗺️ Map</label></div>
   <div class="LeftArrow" id="jobsPrevBtn">&lt;</div>
-  <div class="carousel">
-    <div class="job-card">
-      <div class="JobSectionTop"><h3>Sample Job Title</h3></div>
-      <div class="JobSectionMedium">This is a preview of the job-card layout. Live listings appear here once the board is connected to its backend.</div>
-      <div class="JobSectionBottom"><span>📍 Location</span><span>💰 Pay / rate</span></div>
-    </div>
+  <div class="carousel" id="jobsCarousel">
+    <div class="carousel-msg">Loading jobs…</div>
   </div>
+  <div class="carousel-pager" id="jobsPager"></div>
   <div class="RightArrow" id="jobsNextBtn">&gt;</div>
   <div class="search-container">
     <textarea class="search-box" id="jobsKeyword" placeholder="Search jobs..."></textarea>
@@ -232,8 +522,8 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
   <label for="togglePostJobs" class="close-button PostJobs"><span>Back</span></label>
   <div class="top-menu"><label for="toggleMapMenu" class="top-map-label">🗺️ Map</label></div>
   <div class="LeftSection"><!-- AD SLOT 1 --></div>
-  <div class="CenterSection">
-    <select>
+  <div class="CenterSection" id="postJobForm">
+    <select id="pj-category">
       <option value="">Job Field / Category</option>
       <option value="business_finance">Business, Finance</option>
       <option value="administration">Administration</option>
@@ -247,26 +537,26 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
       <option value="legal_government">Legal and Government</option>
     </select>
     <div class="row">
-      <select>
+      <select id="pj-pay-type">
         <option value="">Pay Type</option>
         <option value="remote_fixed">Remote — Fixed Bounty</option>
         <option value="remote_hourly">Remote — Hourly</option>
         <option value="inperson_fixed">In Person — Fixed</option>
         <option value="inperson_hourly">In Person — Hourly</option>
       </select>
-      <input type="text" placeholder="Pay Amount">
+      <input type="text" id="pj-pay-amount" placeholder="Pay Amount">
     </div>
-    <input type="text" placeholder="Job Title">
-    <input type="text" placeholder="Keyword, Keyword, Keyword...">
+    <input type="text" id="pj-title" placeholder="Job Title">
+    <input type="text" id="pj-keywords" placeholder="Keyword, Keyword, Keyword...">
     <div class="row">
-      <input type="email" placeholder="E-mail">
-      <input type="text" placeholder="Phone Number">
+      <input type="email" id="pj-email" placeholder="E-mail">
+      <input type="text"  id="pj-phone" placeholder="Phone Number">
       <label for="toggleMapMenu" class="InFormMapBtn">📍 Set Location</label>
     </div>
-    <textarea class="JobDetailsTextarea" placeholder="Job Details"></textarea>
+    <textarea class="JobDetailsTextarea" id="pj-details" placeholder="Job Details"></textarea>
     <div class="row ButtonContainer">
-      <button class="ResetButton">Reset</button>
-      <button class="SubmitButton">Submit</button>
+      <button class="ResetButton" id="pj-reset">Reset</button>
+      <button class="SubmitButton" id="pj-submit">Submit</button>
     </div>
   </div>
   <div class="RightSection"><!-- AD SLOT 2 --></div>
@@ -278,19 +568,20 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
   <label for="toggleDropResumes" class="close-button DropResumes"><span>Back</span></label>
   <div class="top-menu"><label for="toggleMapMenu" class="top-map-label">🗺️ Map</label></div>
   <div class="LeftSection"><!-- AD SLOT 3 --></div>
-  <div class="CenterSection">
-    <input type="text" placeholder="Full Name">
-    <input type="email" placeholder="Email">
-    <input type="text" placeholder="Phone Number">
-    <input type="text" placeholder="Minimum Salary Per Hour">
-    <input type="text" placeholder="Keywords (e.g., Skill1, Skill2, Skill3)">
+  <div class="CenterSection" id="postResumeForm">
+    <input type="text"  id="pr-name"       placeholder="Full Name">
+    <input type="email" id="pr-email"      placeholder="Email">
+    <input type="text"  id="pr-phone"      placeholder="Phone Number">
+    <input type="text"  id="pr-min-salary" placeholder="Minimum Salary Per Hour">
+    <input type="text"  id="pr-keywords"   placeholder="Keywords (e.g., Skill1, Skill2, Skill3)">
+    <textarea class="ResumeTextarea" id="pr-resume-text" placeholder="Brief bio / skills summary (plain text)"></textarea>
     <div class="row">
-      <div class="UploadContainer"><input type="file" class="ResumeInput" accept="application/pdf"></div>
+      <div class="UploadContainer"><input type="file" class="ResumeInput" id="pr-pdf" accept="application/pdf"></div>
       <label for="toggleMapMenu" class="InFormMapBtn">📍 Set Location</label>
     </div>
     <div class="row ButtonContainer">
-      <button class="ResetButton">Reset</button>
-      <button class="SubmitButton">Submit</button>
+      <button class="ResetButton" id="pr-reset">Reset</button>
+      <button class="SubmitButton" id="pr-submit">Submit</button>
     </div>
   </div>
   <div class="RightSection"><!-- AD SLOT 4 --></div>
@@ -302,17 +593,10 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
   <label for="toggleGetResumes" class="close-button GetResumes"><span>Back</span></label>
   <div class="top-menu"><label for="toggleMapMenu" class="top-map-label">🗺️ Map</label></div>
   <div class="LeftArrow" id="resumesPrevBtn">&lt;</div>
-  <div class="carousel">
-    <div class="resume-card">
-      <div class="resume-preview">Résumé preview (PDF) appears here</div>
-      <div class="resume-details">
-        <div class="detail-line">Applicant Name</div>
-        <div class="detail-line">Phone</div>
-        <div class="detail-line">Email</div>
-        <div class="detail-line">Skills, keywords</div>
-      </div>
-    </div>
+  <div class="carousel" id="resumesCarousel">
+    <div class="carousel-msg">Loading resumes…</div>
   </div>
+  <div class="carousel-pager" id="resumesPager"></div>
   <div class="RightArrow" id="resumesNextBtn">&gt;</div>
   <div class="search-container">
     <textarea class="search-box" id="resumesKeyword" placeholder="Search resumes..."></textarea>
@@ -336,12 +620,26 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
 </div>
 
 <script>
-/* The ONLY JavaScript in the app — drives the map (canvas, click->tile, radius,
-   remote, localStorage). Panels and the overlay are pure CSS. Carousel pagination
-   and live listings get wired in here once the backend exists (see header block). */
 (function () {
   'use strict';
-  var TILE = '40_-74', RADIUS = 1, REMOTE = false;
+
+  /* ── helpers ── */
+  function esc(s) {
+    return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+  function toast(msg, ms) {
+    var el = document.getElementById('nsw-toast');
+    el.textContent = msg;
+    el.classList.add('show');
+    clearTimeout(el._t);
+    el._t = setTimeout(function(){ el.classList.remove('show'); }, ms || 3000);
+  }
+  function getTile()   { return localStorage.getItem('nsw_tile')   || '40_-74'; }
+  function getRadius() { return parseInt(localStorage.getItem('nsw_radius') || '1', 10); }
+  function getRemote() { return localStorage.getItem('nsw_remote') === 'true'; }
+
+  /* ── map / localStorage ── */
+  var TILE = getTile(), RADIUS = getRadius(), REMOTE = getRemote();
   var canvas = document.getElementById('worldMap'), ctx = canvas.getContext('2d');
   var slider = document.getElementById('radiusSlider'),
       rVal   = document.getElementById('radiusValue'),
@@ -392,6 +690,210 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
   toggle.addEventListener('change', function () { if (this.checked) draw(); });
 
   load(); draw();
+
+  /* ── carousel state ── */
+  var jobsListings = [], jobsIdx = 0, jobsTotal = 0;
+  var resumesListings = [], resumesIdx = 0, resumesTotal = 0;
+
+  function apiUrl(type, page, keyword) {
+    return 'index.php?api=' + type
+      + '&tile='    + encodeURIComponent(getTile())
+      + '&radius='  + getRadius()
+      + '&remote='  + (getRemote() ? '1' : '0')
+      + '&keyword=' + encodeURIComponent(keyword || '')
+      + '&page='    + (page || 0);
+  }
+
+  function renderJob(l) {
+    var isRemote = l.remote ? ' 🌐 Remote' : '';
+    return '<div class="job-card">'
+      + '<div class="JobSectionTop"><h3>' + esc(l.title) + '</h3>'
+      + '<small>' + esc(l.category.replace(/_/g,' ')) + isRemote + '</small></div>'
+      + '<div class="JobSectionMedium">' + esc(l.description) + '</div>'
+      + '<div class="JobSectionBottom">'
+      + '<span>📍 ' + esc(l.tile.replace('_','°N ') + '°') + '</span>'
+      + '<span>💰 ' + esc(l.pay_amount || l.pay_type.replace(/_/g,' ')) + '</span>'
+      + (l.contact_email ? '<span>✉️ ' + esc(l.contact_email) + '</span>' : '')
+      + (l.contact_phone ? '<span>📞 ' + esc(l.contact_phone) + '</span>' : '')
+      + '</div></div>';
+  }
+
+  function renderResume(l) {
+    var pdfHref = l.pdf_path
+      ? 'index.php?api=serve_pdf&file=' + encodeURIComponent(l.pdf_path) + '&tile=' + encodeURIComponent(l.tile)
+      : null;
+    var preview = pdfHref
+      ? '<a href="' + esc(pdfHref) + '" target="_blank" style="color:var(--blue);font-size:18px;font-weight:bold">📄 View PDF Resume</a>'
+      : '<span>' + esc(l.resume_text || 'No preview available') + '</span>';
+    return '<div class="resume-card">'
+      + '<div class="resume-preview">' + preview + '</div>'
+      + '<div class="resume-details">'
+      + '<div class="detail-line">' + esc(l.name) + '</div>'
+      + (l.phone ? '<div class="detail-line">📞 ' + esc(l.phone) + '</div>' : '')
+      + '<div class="detail-line">✉️ ' + esc(l.email) + '</div>'
+      + '<div class="detail-line">🔑 ' + esc(l.keywords) + '</div>'
+      + (l.min_salary ? '<div>💰 ' + esc(l.min_salary) + '/hr min</div>' : '')
+      + (l.remote ? '<div>🌐 Open to remote</div>' : '')
+      + '</div></div>';
+  }
+
+  function showJobsPage() {
+    var car = document.getElementById('jobsCarousel');
+    var pgr = document.getElementById('jobsPager');
+    if (!jobsListings.length) {
+      car.innerHTML = '<div class="carousel-msg">No jobs found in this area yet.<br>Be the first to post one!</div>';
+      pgr.textContent = '';
+      return;
+    }
+    car.innerHTML = renderJob(jobsListings[jobsIdx]);
+    pgr.textContent = (jobsIdx + 1) + ' / ' + jobsListings.length + (jobsTotal > jobsListings.length ? '+' : '');
+  }
+
+  function showResumesPage() {
+    var car = document.getElementById('resumesCarousel');
+    var pgr = document.getElementById('resumesPager');
+    if (!resumesListings.length) {
+      car.innerHTML = '<div class="carousel-msg">No resumes found in this area yet.</div>';
+      pgr.textContent = '';
+      return;
+    }
+    car.innerHTML = renderResume(resumesListings[resumesIdx]);
+    pgr.textContent = (resumesIdx + 1) + ' / ' + resumesListings.length + (resumesTotal > resumesListings.length ? '+' : '');
+  }
+
+  function fetchJobs(page, keyword) {
+    document.getElementById('jobsCarousel').innerHTML = '<div class="carousel-msg">Loading…</div>';
+    fetch(apiUrl('jobs', page || 0, keyword !== undefined ? keyword : document.getElementById('jobsKeyword').value))
+      .then(function(r){ return r.json(); })
+      .then(function(data){
+        jobsListings = data.listings || [];
+        jobsTotal    = data.total   || 0;
+        jobsIdx      = 0;
+        showJobsPage();
+      })
+      .catch(function(){
+        document.getElementById('jobsCarousel').innerHTML = '<div class="carousel-msg" style="color:var(--red)">Could not load listings.</div>';
+      });
+  }
+
+  function fetchResumes(page, keyword) {
+    document.getElementById('resumesCarousel').innerHTML = '<div class="carousel-msg">Loading…</div>';
+    fetch(apiUrl('resumes', page || 0, keyword !== undefined ? keyword : document.getElementById('resumesKeyword').value))
+      .then(function(r){ return r.json(); })
+      .then(function(data){
+        resumesListings = data.listings || [];
+        resumesTotal    = data.total   || 0;
+        resumesIdx      = 0;
+        showResumesPage();
+      })
+      .catch(function(){
+        document.getElementById('resumesCarousel').innerHTML = '<div class="carousel-msg" style="color:var(--red)">Could not load listings.</div>';
+      });
+  }
+
+  /* arrow navigation */
+  document.getElementById('jobsPrevBtn').addEventListener('click', function(){
+    if (jobsIdx > 0) { jobsIdx--; showJobsPage(); }
+  });
+  document.getElementById('jobsNextBtn').addEventListener('click', function(){
+    if (jobsIdx < jobsListings.length - 1) { jobsIdx++; showJobsPage(); }
+    else if (jobsListings.length === 10) { fetchJobs(Math.floor(jobsIdx / 10) + 1); }
+  });
+  document.getElementById('resumesPrevBtn').addEventListener('click', function(){
+    if (resumesIdx > 0) { resumesIdx--; showResumesPage(); }
+  });
+  document.getElementById('resumesNextBtn').addEventListener('click', function(){
+    if (resumesIdx < resumesListings.length - 1) { resumesIdx++; showResumesPage(); }
+    else if (resumesListings.length === 10) { fetchResumes(Math.floor(resumesIdx / 10) + 1); }
+  });
+
+  /* search / filter */
+  document.getElementById('jobsFilterBtn').addEventListener('click', function(){ fetchJobs(0); });
+  document.getElementById('resumesFilterBtn').addEventListener('click', function(){ fetchResumes(0); });
+
+  /* auto-load when panels open */
+  document.getElementById('toggleBrowseJobs').addEventListener('change', function(){
+    if (this.checked) fetchJobs(0, '');
+  });
+  document.getElementById('toggleGetResumes').addEventListener('change', function(){
+    if (this.checked) fetchResumes(0, '');
+  });
+
+  /* ── form: Post a Job ── */
+  document.getElementById('pj-reset').addEventListener('click', function(){
+    ['pj-category','pj-pay-type','pj-pay-amount','pj-title','pj-keywords','pj-email','pj-phone','pj-details']
+      .forEach(function(id){ document.getElementById(id).value = ''; });
+  });
+
+  document.getElementById('pj-submit').addEventListener('click', function(){
+    var tile = getTile();
+    var payType = document.getElementById('pj-pay-type').value;
+    var isRemote = payType.startsWith('remote') ? '1' : (getRemote() ? '1' : '0');
+    var fd = new FormData();
+    fd.append('tile',       tile);
+    fd.append('category',   document.getElementById('pj-category').value);
+    fd.append('pay_type',   payType);
+    fd.append('pay_amount', document.getElementById('pj-pay-amount').value);
+    fd.append('title',      document.getElementById('pj-title').value);
+    fd.append('keywords',   document.getElementById('pj-keywords').value);
+    fd.append('email',      document.getElementById('pj-email').value);
+    fd.append('phone',      document.getElementById('pj-phone').value);
+    fd.append('details',    document.getElementById('pj-details').value);
+    fd.append('remote',     isRemote);
+    var btn = this;
+    btn.disabled = true; btn.textContent = 'Posting…';
+    fetch('index.php?api=post_job', { method: 'POST', body: fd })
+      .then(function(r){ return r.json(); })
+      .then(function(data){
+        if (data.ok) {
+          toast('Job posted! ✓');
+          document.getElementById('pj-reset').click();
+          document.getElementById('togglePostJobs').checked = false;
+        } else {
+          toast('Error: ' + (data.error || 'unknown'));
+        }
+      })
+      .catch(function(){ toast('Network error — try again.'); })
+      .finally(function(){ btn.disabled = false; btn.textContent = 'Submit'; });
+  });
+
+  /* ── form: Leave a Resume ── */
+  document.getElementById('pr-reset').addEventListener('click', function(){
+    ['pr-name','pr-email','pr-phone','pr-min-salary','pr-keywords','pr-resume-text']
+      .forEach(function(id){ document.getElementById(id).value = ''; });
+    document.getElementById('pr-pdf').value = '';
+  });
+
+  document.getElementById('pr-submit').addEventListener('click', function(){
+    var tile = getTile();
+    var fd = new FormData();
+    fd.append('tile',        tile);
+    fd.append('name',        document.getElementById('pr-name').value);
+    fd.append('email',       document.getElementById('pr-email').value);
+    fd.append('phone',       document.getElementById('pr-phone').value);
+    fd.append('min_salary',  document.getElementById('pr-min-salary').value);
+    fd.append('keywords',    document.getElementById('pr-keywords').value);
+    fd.append('resume_text', document.getElementById('pr-resume-text').value);
+    fd.append('remote',      getRemote() ? '1' : '0');
+    var pdf = document.getElementById('pr-pdf').files[0];
+    if (pdf) fd.append('resume_pdf', pdf);
+    var btn = this;
+    btn.disabled = true; btn.textContent = 'Uploading…';
+    fetch('index.php?api=post_resume', { method: 'POST', body: fd })
+      .then(function(r){ return r.json(); })
+      .then(function(data){
+        if (data.ok) {
+          toast('Resume posted! ✓');
+          document.getElementById('pr-reset').click();
+          document.getElementById('toggleDropResumes').checked = false;
+        } else {
+          toast('Error: ' + (data.error || 'unknown'));
+        }
+      })
+      .catch(function(){ toast('Network error — try again.'); })
+      .finally(function(){ btn.disabled = false; btn.textContent = 'Submit'; });
+  });
+
 }());
 </script>
 </body>

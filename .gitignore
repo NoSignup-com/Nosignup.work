@@ -1,0 +1,11 @@
+# Runtime data — job/resume JSON shards, uploaded PDFs, IP rate-limit counters.
+# NEVER commit these: they hold user contact info / PII. The app recreates them.
+.nsw-data/
+shards/
+ip_posts/
+
+# Local editor / tooling config (not part of the deployed app)
+.claude/
+
+# Logs & scratch
+*.log
