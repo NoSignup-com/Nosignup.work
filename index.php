@@ -167,10 +167,13 @@ if (isset($_GET['api'])) {
         if (!nsw_tile_ok($tile)) nsw_json_out(['error' => 'bad tile'], 400);
         $cats      = ['business_finance','administration','marketing_sales','engineering_technology','healthcare','education_training','construction_trades','arts','logistics_transportation','legal_government'];
         $pay_types = ['remote_fixed','remote_hourly','inperson_fixed','inperson_hourly'];
-        $cat      = in_array($_POST['category'] ?? '', $cats, true)      ? $_POST['category'] : '';
-        $pay_type = in_array($_POST['pay_type'] ?? '', $pay_types, true) ? $_POST['pay_type'] : '';
-        if (!$cat || !$pay_type || empty($_POST['title']) || empty($_POST['details']))
-            nsw_json_out(['error' => 'missing required fields (category, pay_type, title, details)'], 400);
+        $cat        = in_array($_POST['category'] ?? '', $cats, true)      ? $_POST['category'] : '';
+        $pay_type   = in_array($_POST['pay_type'] ?? '', $pay_types, true) ? $_POST['pay_type'] : '';
+        $pay_amount = trim((string)($_POST['pay_amount'] ?? ''));
+        // Pay is MANDATORY — no pay specified means no job posted. Free text keeps
+        // the variance ($25/hr, $500 flat, "$20-25 DOE"); it just may not be blank.
+        if (!$cat || !$pay_type || $pay_amount === '' || empty($_POST['title']) || empty($_POST['details']))
+            nsw_json_out(['error' => 'missing required fields (category, pay type, pay amount, title, details)'], 400);
         $id   = nsw_new_id($ip);
         $remote = (!empty($_POST['remote']) && $_POST['remote'] !== '0') || strpos($pay_type, 'remote') === 0;
         $data = [
@@ -179,7 +182,7 @@ if (isset($_GET['api'])) {
             'title'         => nsw_san($_POST['title'],      120),
             'category'      => $cat,
             'pay_type'      => $pay_type,
-            'pay_amount'    => nsw_san($_POST['pay_amount'] ?? '', 80),
+            'pay_amount'    => nsw_san($pay_amount, 80),
             'description'   => nsw_san($_POST['details'],    2000),
             'contact_email' => nsw_san($_POST['email']   ?? '', 200),
             'contact_phone' => nsw_san($_POST['phone']   ?? '', 40),
@@ -198,7 +201,7 @@ if (isset($_GET['api'])) {
         if (!nsw_rate_ok($ip)) nsw_json_out(['error' => 'rate limited (max 5/hr)'], 429);
         $tile = $_POST['tile'] ?? '';
         if (!nsw_tile_ok($tile)) nsw_json_out(['error' => 'bad tile'], 400);
-        // text-only resumes (no PDFs) — name, email, and the resume text are required
+        // text-only resumes — name, email, and the pasted resume body are required
         if (empty($_POST['name']) || empty($_POST['email']) || empty($_POST['resume_text']))
             nsw_json_out(['error' => 'missing required fields (name, email, resume_text)'], 400);
         $id  = nsw_new_id($ip);
@@ -211,7 +214,7 @@ if (isset($_GET['api'])) {
             'phone'       => nsw_san($_POST['phone'] ?? '',    40),
             'min_salary'  => nsw_san($_POST['min_salary'] ?? '', 80),
             'keywords'    => nsw_san($_POST['keywords'] ?? '', 200),
-            'resume_text' => nsw_san($_POST['resume_text'], 5000),
+            'resume_text' => nsw_san($_POST['resume_text'], 20000),  // whole resume body pasted in
             'remote'      => $remote,
             'timestamp'   => time(),
         ];
@@ -229,7 +232,7 @@ DO NOT DELETE/REMOVE THIS BLOCK — NOSIGNUP.WORK — DO NOT DELETE/REMOVE THIS 
 ================================================================================
 NOSIGNUP.WORK — stateless job/resume exchange. No signup, no tracking.
 localStorage allowed. PHASE: front-end + PHP file-shard backend WIRED. Text-only
-listings (no file uploads); every post is permanent and auto-deletes after 90 days.
+listings; jobs MUST specify pay; posters can't edit/remove a post; auto-deletes at 90 days.
 
 ARCHITECTURE (do not break):
 - The four quadrants AND the map overlay toggle via a pure-CSS checkbox hack.
@@ -489,13 +492,13 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
     </select>
     <div class="row">
       <select id="pj-pay-type">
-        <option value="">Pay Type</option>
+        <option value="">Pay Type — required</option>
         <option value="remote_fixed">Remote — Fixed Bounty</option>
         <option value="remote_hourly">Remote — Hourly</option>
         <option value="inperson_fixed">In Person — Fixed</option>
         <option value="inperson_hourly">In Person — Hourly</option>
       </select>
-      <input type="text" id="pj-pay-amount" placeholder="Pay Amount">
+      <input type="text" id="pj-pay-amount" placeholder="Pay — required (e.g. $25/hr, $500 flat)">
     </div>
     <input type="text" id="pj-title" placeholder="Job Title">
     <input type="text" id="pj-keywords" placeholder="Keyword, Keyword, Keyword...">
@@ -505,7 +508,7 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
       <label for="toggleMapMenu" class="InFormMapBtn">📍 Set Location</label>
     </div>
     <textarea class="JobDetailsTextarea" id="pj-details" placeholder="Job Details"></textarea>
-    <div class="PermWarning">⚠️ Posts are <b>permanent</b> — you <b>cannot</b> edit or remove a job once posted. It is <b>automatically deleted 90 days</b> after posting.</div>
+    <div class="PermWarning">⚠️ Once posted you <b>can’t edit or remove</b> this job yourself. It stays live and is <b>automatically deleted 90 days</b> after posting.</div>
     <div class="row ButtonContainer">
       <button class="ResetButton" id="pj-reset">Reset</button>
       <button class="SubmitButton" id="pj-submit">Submit</button>
@@ -530,7 +533,7 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
     <div class="row">
       <label for="toggleMapMenu" class="InFormMapBtn">📍 Set Location</label>
     </div>
-    <div class="PermWarning">⚠️ Submissions are <b>permanent</b> — you <b>cannot</b> edit or remove your résumé once submitted. It is <b>automatically deleted 90 days</b> after posting.</div>
+    <div class="PermWarning">⚠️ Once submitted you <b>can’t edit or remove</b> your résumé yourself. It stays live and is <b>automatically deleted 90 days</b> after posting.</div>
     <div class="row ButtonContainer">
       <button class="ResetButton" id="pr-reset">Reset</button>
       <button class="SubmitButton" id="pr-submit">Submit</button>
@@ -766,15 +769,15 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
     if (this.checked) fetchResumes(0, '');
   });
 
-  /* loud permanence gate — must be acknowledged before ANY submission.
+  /* loud submit-warning gate — must be acknowledged before ANY submission.
      EXPIRY_DAYS mirrors NSW_EXPIRY_DAYS in the PHP block above. */
   var EXPIRY_DAYS = 90;
-  function confirmPermanent(kind) {
+  function confirmPost(kind) {
     return window.confirm(
-      '⚠️  THIS ' + kind + ' IS PERMANENT\n\n' +
-      'Once submitted you CANNOT edit or remove it.\n' +
-      'It is automatically deleted ' + EXPIRY_DAYS + ' days after posting.\n\n' +
-      'Do you want to submit it now?'
+      '⚠️  HEADS UP — you can’t take this back\n\n' +
+      'Once submitted, you can’t edit or remove this ' + kind + ' yourself.\n' +
+      'It stays live and is automatically deleted ' + EXPIRY_DAYS + ' days after posting.\n\n' +
+      'Submit it now?'
     );
   }
   function postForm(url, body, btn, busyLabel, okMsg, toggleId, resetId) {
@@ -801,20 +804,21 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
   });
 
   document.getElementById('pj-submit').addEventListener('click', function(){
-    var category = document.getElementById('pj-category').value;
-    var payType  = document.getElementById('pj-pay-type').value;
-    var title    = document.getElementById('pj-title').value.trim();
-    var details  = document.getElementById('pj-details').value.trim();
-    if (!category || !payType || !title || !details) {
-      toast('Please fill in category, pay type, title and details.'); return;
+    var category  = document.getElementById('pj-category').value;
+    var payType   = document.getElementById('pj-pay-type').value;
+    var payAmount = document.getElementById('pj-pay-amount').value.trim();
+    var title     = document.getElementById('pj-title').value.trim();
+    var details   = document.getElementById('pj-details').value.trim();
+    if (!category || !payType || !payAmount || !title || !details) {
+      toast('Jobs must state the pay — fill in category, pay type, pay amount, title and details.'); return;
     }
-    if (!confirmPermanent('JOB POST')) return;
+    if (!confirmPost('job post')) return;
     var isRemote = payType.indexOf('remote') === 0 ? '1' : (getRemote() ? '1' : '0');
     var body = new URLSearchParams({
       tile:       getTile(),
       category:   category,
       pay_type:   payType,
-      pay_amount: document.getElementById('pj-pay-amount').value,
+      pay_amount: payAmount,
       title:      title,
       keywords:   document.getElementById('pj-keywords').value,
       email:      document.getElementById('pj-email').value,
@@ -825,7 +829,7 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
     postForm('index.php?api=post_job', body, this, 'Posting…', 'Job posted ✓ (live for ' + EXPIRY_DAYS + ' days)', 'togglePostJobs', 'pj-reset');
   });
 
-  /* ── form: Leave a Resume (text only — no PDFs) ── */
+  /* ── form: Leave a Resume (text only) ── */
   document.getElementById('pr-reset').addEventListener('click', function(){
     ['pr-name','pr-email','pr-phone','pr-min-salary','pr-keywords','pr-resume-text']
       .forEach(function(id){ document.getElementById(id).value = ''; });
@@ -838,7 +842,7 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
     if (!name || !email || !resumeText) {
       toast('Please add your name, email and résumé text.'); return;
     }
-    if (!confirmPermanent('RÉSUMÉ')) return;
+    if (!confirmPost('résumé')) return;
     var body = new URLSearchParams({
       tile:        getTile(),
       name:        name,

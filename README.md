@@ -57,7 +57,7 @@ Everything else (forms, carousel layout, ad columns, bottom banner) stays **pure
 
 ## 3. BACKEND API – FILE SHARDS OVER HTTP
 
-All endpoints respond with `Content-Type: application/json` unless serving a PDF.
+All endpoints respond with `Content-Type: application/json`.
 
 ### 3.1 List Jobs / Resumes
 
@@ -110,14 +110,16 @@ All endpoints respond with `Content-Type: application/json` unless serving a PDF
 
 **POST** `index.php?api=post_job`
 
-**Body:** `multipart/form-data` or `application/x-www-form-urlencoded` with fields:
+**Pay is mandatory.** A job with no `pay_amount` is rejected (400) — *no pay specified means no job posted*. The field stays free text so the variance survives (`$25/hr`, `$500 flat`, `$20‑25 DOE`); it just may not be blank.
+
+**Body:** `application/x-www-form-urlencoded` (or `multipart/form-data`) with fields:
 
 | Field | Required | Description |
 |-------|----------|-------------|
 | `tile` | yes | `lat_lon` from map |
 | `category` | yes | one of the predefined categories (business_finance, administration, marketing_sales, engineering_technology, healthcare, education_training, construction_trades, arts, logistics_transportation, legal_government) |
 | `pay_type` | yes | `remote_fixed`, `remote_hourly`, `inperson_fixed`, `inperson_hourly` |
-| `pay_amount` | yes | free text, e.g. `$50/hour` |
+| `pay_amount` | **yes** | free text, e.g. `$50/hour` — **may not be blank** |
 | `title` | yes | max 120 chars |
 | `keywords` | yes | comma‑separated, max 200 chars |
 | `email` | no | for contact |
@@ -135,9 +137,12 @@ All endpoints respond with `Content-Type: application/json` unless serving a PDF
 - Write to `shards/{tile}/jobs/{filename}`.
 - Return `{"ok":true, "id":"filename"}`.
 
-### 3.3 Post a Resume (Text + optional PDF)
+### 3.3 Post a Resume (Text only)
 
 **POST** `index.php?api=post_resume`
+
+Résumés are plain text — no file uploads. The applicant pastes their whole
+résumé body into the `resume_text` field.
 
 **Fields:**
 
@@ -146,33 +151,21 @@ All endpoints respond with `Content-Type: application/json` unless serving a PDF
 | `tile` | yes | `lat_lon` from map |
 | `name` | yes | full name |
 | `email` | yes | contact email |
-| `phone` | yes | contact phone |
+| `phone` | no | contact phone |
 | `min_salary` | no | free text |
-| `keywords` | yes | skills, comma‑separated |
-| `resume_text` | yes | plain text or markdown, max 5000 chars |
-| `resume_pdf` | no | file upload (`application/pdf`), max 2MB |
+| `keywords` | no | skills, comma‑separated |
+| `resume_text` | yes | the whole résumé as plain text, max 20000 chars |
 | `remote` | yes | `0` or `1` (seeking remote work) |
 
 **Storage:**
-- Store `resume_text` in JSON.
-- If PDF uploaded, save as `shards/{tile}/resumes/{filename}.pdf` and store `pdf_path` in JSON.
-- Filename same as JSON (without extension) + `.pdf`.
-- Lazy delete both files when JSON expires.
+- Store `resume_text` (and the other fields) as one JSON file in `shards/{tile}/resumes/`.
 
 **Response:** `{"ok":true, "id":"filename"}`
 
-### 3.4 Serve PDF
-
-**GET** `index.php?api=serve_pdf&file=1700000000_crc32.pdf&tile=40_-74`
-
-- Check file exists in `shards/{tile}/resumes/`.
-- Set `Content-Type: application/pdf`, `Content-Disposition: inline` (or `attachment`).
-- `readfile()` and exit.
-
-### 3.5 Lazy Expiry
+### 3.4 Lazy Expiry
 
 On every read (`glob`) inside listing endpoints, check each file’s `mtime`.  
-If `time() - mtime > 90*86400`, `unlink()` the JSON (and PDF if exists).  
+If `time() - mtime > 90*86400`, `unlink()` the JSON.  
 No separate cron job.
 
 ---
@@ -258,10 +251,10 @@ Given the ethos of “single file, disposable mirrors”, the **recommended MVP*
         │
         ├── static HTML/CSS – 4 quadrants, map, forms (works offline)
         ├── JavaScript – map, localStorage, carousel fetch
-        └── PHP backend (add later) – file shards, no database
+        └── PHP backend – file shards, no database
                ├── GET ?api=jobs&tile=... → returns JSON listings
-               ├── POST ?api=post_job → stores JSON in shards/{tile}/jobs/
-               ├── POST ?api=post_resume → stores JSON + optional PDF
+               ├── POST ?api=post_job → stores JSON in shards/{tile}/jobs/ (pay required)
+               ├── POST ?api=post_resume → stores JSON in shards/{tile}/resumes/ (text only)
                └── lazy expiry >90 days
 ```
 
