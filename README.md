@@ -198,20 +198,52 @@ These are **never sent to the server** except as URL parameters when the user ex
 
 ---
 
-## 6. MIRROR DISCOVERY & FEDERATION (Future, but designed)
+## 6. MIRRORS — SELF-DISTRIBUTION, GOSSIP & BYTE PARITY
 
-To achieve censorship resistance, the network must not rely on a central domain.
+Censorship resistance comes from many disposable, independent mirrors, not a
+central domain. nosignup.work follows the **same staged rollout as nosignup.chat**:
+build the cheap, abuse-free pieces now; defer server-side gossip until it earns
+its moving parts.
 
-- Each mirror maintains `mirrors.json` – list of known mirror URLs (max 64).
-- **Gossip protocol** (identical to nosignup.chat):
-  - Client asks its home mirror `?api=mirror_random` → gets one random mirror URL.
-  - Client then POSTs `?api=mirror_add&url=...` to that random mirror, telling it about its home mirror.
-  - Mirrors cross‑pollinate without central coordination.
-- **Job/resume federation**:
-  - When a mirror receives a request for a foreign tile, it first checks its own shards. If not found, it **redirects** (HTTP 307) to a mirror that claims that tile (via a simple `tile_to_mirror` mapping that mirrors gossip).
-  - Alternatively, simpler: every mirror stores **all tiles** – storage is cheap. Federation is only for redundancy, not sharding. For MVP, each mirror is independent. Federation can be added later.
+### 6.1 BUILT NOW
 
-Given the ethos of “single file, disposable mirrors”, the **recommended MVP**: no federation. Each instance stands alone. Users can manually copy the file to another host. If the original domain goes down, they use a mirror they already know (or discover via gossip in a future version).
+- **`index.php?src=1`** — serves this file's own raw bytes verbatim (`readfile(__FILE__)`),
+  plus an `X-NSW-Source-SHA256` header. This is both the self-distribution download
+  ("drop it on any PHP host") and the basis for the parity check below.
+- **Host-a-Mirror UI** — the centred `＋ Host a Mirror` button opens a modal with the
+  `?src=1` download and a URL/IP field. Submitted mirrors are **staged client-side
+  only**, in `localStorage['nosignup_pending_mirrors']` (FIFO, cap 64). No server
+  endpoint, no `mirrors.json`, no write surface — nothing a spammer can target.
+
+### 6.2 LOCKED DESIGN — SERVER GOSSIP (build later, identical to nosignup.chat)
+
+Deliberately **not** built yet (matches chat's stance: a write endpoint open to the
+public needs an abuse story first). When it lands, both apps implement it the same way:
+
+- Each mirror keeps `mirrors.json` (known mirror URLs, cap 64) in the data dir.
+- `GET ?api=mirror_list` → the list. `GET ?api=mirror_random` → one random mirror.
+- `POST ?api=mirror_add&url=…` adds a candidate **only after a byte-parity check**:
+  1. Fetch `{candidate}/index.php?src=1`.
+  2. `hash('sha256', body)` must equal **our own** `hash_file('sha256', __FILE__)`.
+  3. Identical bytes ⇒ it is genuinely this app (not a look-alike / honeypot) ⇒ add it.
+     Anything else ⇒ reject, never store.
+- **Re-check parity before gossiping a mirror onward.** A mirror that passed once may
+  later be replaced with divergent code; re-fetch `?src=1` and re-compare its hash to
+  ours before handing it to another peer in `mirror_random`/`mirror_list`. Drop on mismatch.
+- The staged client-side list (6.1) is what a browser would flush into `mirror_add`
+  calls during a "gossip pass" once the endpoint exists.
+
+**Constraint to resolve before building:** `mirror_add` makes the server fetch an
+arbitrary URL (SSRF-shaped). Mitigations: only ever fetch the fixed `?src=1` path,
+require http(s), short timeout, response-size cap, and the parity hash (a response
+that isn't our exact bytes is discarded anyway). Until that's locked down, gossip
+stays client-side.
+
+### 6.3 FEDERATION OF LISTINGS
+
+Not needed for the MVP. Storage is cheap, so each mirror simply stands alone and
+serves whatever tiles it has. Cross-mirror tile routing (307 redirects, `tile_to_mirror`
+gossip) remains a future option, not a requirement — an independent mirror is fully useful.
 
 ---
 
