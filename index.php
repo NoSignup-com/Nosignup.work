@@ -1,7 +1,7 @@
 <?php
 /* ============================================================
    NOSIGNUP.WORK — single-file stateless job/resume exchange.
-   API: index.php?api=jobs|resumes|post_job|post_resume|serve_pdf
+   API: index.php?api=jobs|resumes|post_job|post_resume   (text-only; no file uploads)
    Everything else falls through to the HTML/CSS/JS front-end below.
 
    STORAGE IS DROP-IN PORTABLE. Resolution order (first writable wins):
@@ -9,13 +9,13 @@
      2. /var/lib/nosignup/work        (README default; Linux w/ access)
      3. <dir-of-index.php>/.nsw-data   (works literally anywhere)
    A protective .htaccess + index guard is dropped into the data dir so
-   the JSON/PDF shards are not directly web-readable on Apache. On nginx,
+   the JSON shards are not directly web-readable on Apache. On nginx,
    set NSW_DATA_DIR to a path outside your webroot.
    ============================================================ */
 define('NSW_MAX_POSTS_HOUR', 5);
-define('NSW_EXPIRY_SEC',     90 * 86400);
+define('NSW_EXPIRY_DAYS',    90);                 // listings auto-delete after this many days
+define('NSW_EXPIRY_SEC',     NSW_EXPIRY_DAYS * 86400);
 define('NSW_PAGE_SIZE',      10);
-define('NSW_MAX_PDF',        2 * 1024 * 1024);
 
 /* ---- portable base-directory resolution (cached) ---- */
 function nsw_base() {
@@ -96,7 +96,6 @@ function nsw_mkdir($path) {
 function nsw_expire($file) {
     if (filemtime($file) < time() - NSW_EXPIRY_SEC) {
         @unlink($file);
-        @unlink(preg_replace('/\.json$/', '.pdf', $file));
         return true;
     }
     return false;
@@ -145,23 +144,6 @@ function nsw_listings($type, $tile, $radius, $with_remote, $keyword, $page) {
     $total = count($all);
     return ['total' => $total, 'page' => $page, 'listings' => array_values(array_slice($all, $page * NSW_PAGE_SIZE, NSW_PAGE_SIZE))];
 }
-function nsw_is_pdf($tmp, $name) {
-    if (function_exists('finfo_open')) {
-        $fi = finfo_open(FILEINFO_MIME_TYPE);
-        $mime = finfo_file($fi, $tmp);
-        finfo_close($fi);
-        if ($mime === 'application/pdf') return true;
-    } elseif (function_exists('mime_content_type')) {
-        if (mime_content_type($tmp) === 'application/pdf') return true;
-    }
-    // fallback: extension + %PDF magic bytes
-    if (strtolower(substr($name, -4)) === '.pdf') {
-        $h = @file_get_contents($tmp, false, null, 0, 5);
-        return $h !== false && strncmp($h, '%PDF-', 5) === 0;
-    }
-    return false;
-}
-
 if (isset($_GET['api'])) {
     $api = $_GET['api'];
 
@@ -216,23 +198,10 @@ if (isset($_GET['api'])) {
         if (!nsw_rate_ok($ip)) nsw_json_out(['error' => 'rate limited (max 5/hr)'], 429);
         $tile = $_POST['tile'] ?? '';
         if (!nsw_tile_ok($tile)) nsw_json_out(['error' => 'bad tile'], 400);
-        if (empty($_POST['name']) || empty($_POST['email']))
-            nsw_json_out(['error' => 'missing required fields (name, email)'], 400);
+        // text-only resumes (no PDFs) — name, email, and the resume text are required
+        if (empty($_POST['name']) || empty($_POST['email']) || empty($_POST['resume_text']))
+            nsw_json_out(['error' => 'missing required fields (name, email, resume_text)'], 400);
         $id  = nsw_new_id($ip);
-        $dir = nsw_shards() . "/$tile/resumes/";
-        if (!nsw_mkdir($dir)) nsw_json_out(['error' => 'storage not writable'], 500);
-        $pdf = null;
-        if (isset($_FILES['resume_pdf']) && $_FILES['resume_pdf']['error'] === UPLOAD_ERR_OK
-            && $_FILES['resume_pdf']['size'] > 0 && $_FILES['resume_pdf']['size'] <= NSW_MAX_PDF
-            && nsw_is_pdf($_FILES['resume_pdf']['tmp_name'], $_FILES['resume_pdf']['name'])) {
-            $dest = $dir . $id . '.pdf';
-            // is_uploaded_file/move_uploaded_file under real SAPI; copy fallback for CLI tests
-            if (is_uploaded_file($_FILES['resume_pdf']['tmp_name'])) {
-                if (move_uploaded_file($_FILES['resume_pdf']['tmp_name'], $dest)) $pdf = $id . '.pdf';
-            } elseif (@copy($_FILES['resume_pdf']['tmp_name'], $dest)) {
-                $pdf = $id . '.pdf';
-            }
-        }
         $remote = !empty($_POST['remote']) && $_POST['remote'] !== '0';
         $data = [
             'id'          => $id,
@@ -242,33 +211,12 @@ if (isset($_GET['api'])) {
             'phone'       => nsw_san($_POST['phone'] ?? '',    40),
             'min_salary'  => nsw_san($_POST['min_salary'] ?? '', 80),
             'keywords'    => nsw_san($_POST['keywords'] ?? '', 200),
-            'resume_text' => nsw_san($_POST['resume_text'] ?? '', 5000),
-            'pdf_path'    => $pdf,
+            'resume_text' => nsw_san($_POST['resume_text'], 5000),
             'remote'      => $remote,
             'timestamp'   => time(),
         ];
         if (!nsw_store('resumes', $tile, $id, $data)) nsw_json_out(['error' => 'storage not writable'], 500);
         nsw_json_out(['ok' => true, 'id' => $id]);
-    }
-
-    /* --- serve PDF --- */
-    if ($api === 'serve_pdf') {
-        $tile = $_GET['tile'] ?? '';
-        $file = basename($_GET['file'] ?? '');
-        if (!nsw_tile_ok($tile) || !preg_match('/^\d+_[0-9a-f]+\.pdf$/', $file)) { http_response_code(400); exit; }
-        // check both the tile dir and the remote aggregate
-        $paths = [nsw_shards() . "/$tile/resumes/$file", nsw_shards() . '/' . NSW_REMOTE_TILE . "/resumes/$file"];
-        foreach ($paths as $path) {
-            if (is_file($path)) {
-                header('Content-Type: application/pdf');
-                header('Content-Disposition: inline; filename="resume.pdf"');
-                header('Content-Length: ' . filesize($path));
-                readfile($path);
-                exit;
-            }
-        }
-        http_response_code(404);
-        exit;
     }
 
     nsw_json_out(['error' => 'unknown api'], 400);
@@ -280,7 +228,8 @@ if (isset($_GET['api'])) {
 DO NOT DELETE/REMOVE THIS BLOCK — NOSIGNUP.WORK — DO NOT DELETE/REMOVE THIS BLOCK
 ================================================================================
 NOSIGNUP.WORK — stateless job/resume exchange. No signup, no tracking.
-localStorage allowed. PHASE: HTML/CSS front-end; PHP file-shard backend NOT wired yet.
+localStorage allowed. PHASE: front-end + PHP file-shard backend WIRED. Text-only
+listings (no file uploads); every post is permanent and auto-deletes after 90 days.
 
 ARCHITECTURE (do not break):
 - The four quadrants AND the map overlay toggle via a pure-CSS checkbox hack.
@@ -427,9 +376,11 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
 .row>*{flex:1}
 .JobDetailsTextarea{height:24vh;min-height:120px;resize:none}
 .ResumeTextarea{height:16vh;min-height:80px;resize:none}
-.UploadContainer{display:flex;align-items:center;justify-content:center;padding:8px;
-  border:1px dashed var(--line);border-radius:12px}
-.ResumeInput{width:100%;font-size:14px}
+/* loud permanence warning shown in both post forms */
+.PermWarning{width:80%;background:rgba(244,67,54,.12);border:2px solid var(--red);
+  border-radius:12px;color:#b71c1c;font-size:14px;font-weight:bold;line-height:1.45;
+  padding:10px 14px;text-align:center}
+.PermWarning b{color:#8e0000}
 .InFormMapBtn{display:flex;align-items:center;justify-content:center;gap:.3em;font-size:16px;
   font-weight:bold;color:#fff;background:var(--blue);border:none;border-radius:12px;cursor:pointer;transition:filter .15s}
 .InFormMapBtn:hover{filter:brightness(1.08)}
@@ -554,6 +505,7 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
       <label for="toggleMapMenu" class="InFormMapBtn">📍 Set Location</label>
     </div>
     <textarea class="JobDetailsTextarea" id="pj-details" placeholder="Job Details"></textarea>
+    <div class="PermWarning">⚠️ Posts are <b>permanent</b> — you <b>cannot</b> edit or remove a job once posted. It is <b>automatically deleted 90 days</b> after posting.</div>
     <div class="row ButtonContainer">
       <button class="ResetButton" id="pj-reset">Reset</button>
       <button class="SubmitButton" id="pj-submit">Submit</button>
@@ -574,11 +526,11 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
     <input type="text"  id="pr-phone"      placeholder="Phone Number">
     <input type="text"  id="pr-min-salary" placeholder="Minimum Salary Per Hour">
     <input type="text"  id="pr-keywords"   placeholder="Keywords (e.g., Skill1, Skill2, Skill3)">
-    <textarea class="ResumeTextarea" id="pr-resume-text" placeholder="Brief bio / skills summary (plain text)"></textarea>
+    <textarea class="ResumeTextarea" id="pr-resume-text" placeholder="Your résumé — bio, experience, skills (plain text)"></textarea>
     <div class="row">
-      <div class="UploadContainer"><input type="file" class="ResumeInput" id="pr-pdf" accept="application/pdf"></div>
       <label for="toggleMapMenu" class="InFormMapBtn">📍 Set Location</label>
     </div>
+    <div class="PermWarning">⚠️ Submissions are <b>permanent</b> — you <b>cannot</b> edit or remove your résumé once submitted. It is <b>automatically deleted 90 days</b> after posting.</div>
     <div class="row ButtonContainer">
       <button class="ResetButton" id="pr-reset">Reset</button>
       <button class="SubmitButton" id="pr-submit">Submit</button>
@@ -719,14 +671,9 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
   }
 
   function renderResume(l) {
-    var pdfHref = l.pdf_path
-      ? 'index.php?api=serve_pdf&file=' + encodeURIComponent(l.pdf_path) + '&tile=' + encodeURIComponent(l.tile)
-      : null;
-    var preview = pdfHref
-      ? '<a href="' + esc(pdfHref) + '" target="_blank" style="color:var(--blue);font-size:18px;font-weight:bold">📄 View PDF Resume</a>'
-      : '<span>' + esc(l.resume_text || 'No preview available') + '</span>';
     return '<div class="resume-card">'
-      + '<div class="resume-preview">' + preview + '</div>'
+      + '<div class="resume-preview" style="padding:14px;white-space:pre-wrap;color:#334;align-items:flex-start;text-align:left">'
+      + esc(l.resume_text || 'No résumé text provided') + '</div>'
       + '<div class="resume-details">'
       + '<div class="detail-line">' + esc(l.name) + '</div>'
       + (l.phone ? '<div class="detail-line">📞 ' + esc(l.phone) + '</div>' : '')
@@ -819,6 +766,34 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
     if (this.checked) fetchResumes(0, '');
   });
 
+  /* loud permanence gate — must be acknowledged before ANY submission.
+     EXPIRY_DAYS mirrors NSW_EXPIRY_DAYS in the PHP block above. */
+  var EXPIRY_DAYS = 90;
+  function confirmPermanent(kind) {
+    return window.confirm(
+      '⚠️  THIS ' + kind + ' IS PERMANENT\n\n' +
+      'Once submitted you CANNOT edit or remove it.\n' +
+      'It is automatically deleted ' + EXPIRY_DAYS + ' days after posting.\n\n' +
+      'Do you want to submit it now?'
+    );
+  }
+  function postForm(url, body, btn, busyLabel, okMsg, toggleId, resetId) {
+    btn.disabled = true; btn.textContent = busyLabel;
+    fetch(url, { method: 'POST', body: body })   // URLSearchParams => x-www-form-urlencoded
+      .then(function(r){ return r.json(); })
+      .then(function(data){
+        if (data.ok) {
+          toast(okMsg);
+          document.getElementById(resetId).click();          // clear only on success
+          document.getElementById(toggleId).checked = false;  // close the panel
+        } else {
+          toast('Error: ' + (data.error || 'unknown'));
+        }
+      })
+      .catch(function(){ toast('Network error — try again.'); })
+      .finally(function(){ btn.disabled = false; btn.textContent = 'Submit'; });
+  }
+
   /* ── form: Post a Job ── */
   document.getElementById('pj-reset').addEventListener('click', function(){
     ['pj-category','pj-pay-type','pj-pay-amount','pj-title','pj-keywords','pj-email','pj-phone','pj-details']
@@ -826,72 +801,55 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
   });
 
   document.getElementById('pj-submit').addEventListener('click', function(){
-    var tile = getTile();
-    var payType = document.getElementById('pj-pay-type').value;
-    var isRemote = payType.startsWith('remote') ? '1' : (getRemote() ? '1' : '0');
-    var fd = new FormData();
-    fd.append('tile',       tile);
-    fd.append('category',   document.getElementById('pj-category').value);
-    fd.append('pay_type',   payType);
-    fd.append('pay_amount', document.getElementById('pj-pay-amount').value);
-    fd.append('title',      document.getElementById('pj-title').value);
-    fd.append('keywords',   document.getElementById('pj-keywords').value);
-    fd.append('email',      document.getElementById('pj-email').value);
-    fd.append('phone',      document.getElementById('pj-phone').value);
-    fd.append('details',    document.getElementById('pj-details').value);
-    fd.append('remote',     isRemote);
-    var btn = this;
-    btn.disabled = true; btn.textContent = 'Posting…';
-    fetch('index.php?api=post_job', { method: 'POST', body: fd })
-      .then(function(r){ return r.json(); })
-      .then(function(data){
-        if (data.ok) {
-          toast('Job posted! ✓');
-          document.getElementById('pj-reset').click();
-          document.getElementById('togglePostJobs').checked = false;
-        } else {
-          toast('Error: ' + (data.error || 'unknown'));
-        }
-      })
-      .catch(function(){ toast('Network error — try again.'); })
-      .finally(function(){ btn.disabled = false; btn.textContent = 'Submit'; });
+    var category = document.getElementById('pj-category').value;
+    var payType  = document.getElementById('pj-pay-type').value;
+    var title    = document.getElementById('pj-title').value.trim();
+    var details  = document.getElementById('pj-details').value.trim();
+    if (!category || !payType || !title || !details) {
+      toast('Please fill in category, pay type, title and details.'); return;
+    }
+    if (!confirmPermanent('JOB POST')) return;
+    var isRemote = payType.indexOf('remote') === 0 ? '1' : (getRemote() ? '1' : '0');
+    var body = new URLSearchParams({
+      tile:       getTile(),
+      category:   category,
+      pay_type:   payType,
+      pay_amount: document.getElementById('pj-pay-amount').value,
+      title:      title,
+      keywords:   document.getElementById('pj-keywords').value,
+      email:      document.getElementById('pj-email').value,
+      phone:      document.getElementById('pj-phone').value,
+      details:    details,
+      remote:     isRemote
+    });
+    postForm('index.php?api=post_job', body, this, 'Posting…', 'Job posted ✓ (live for ' + EXPIRY_DAYS + ' days)', 'togglePostJobs', 'pj-reset');
   });
 
-  /* ── form: Leave a Resume ── */
+  /* ── form: Leave a Resume (text only — no PDFs) ── */
   document.getElementById('pr-reset').addEventListener('click', function(){
     ['pr-name','pr-email','pr-phone','pr-min-salary','pr-keywords','pr-resume-text']
       .forEach(function(id){ document.getElementById(id).value = ''; });
-    document.getElementById('pr-pdf').value = '';
   });
 
   document.getElementById('pr-submit').addEventListener('click', function(){
-    var tile = getTile();
-    var fd = new FormData();
-    fd.append('tile',        tile);
-    fd.append('name',        document.getElementById('pr-name').value);
-    fd.append('email',       document.getElementById('pr-email').value);
-    fd.append('phone',       document.getElementById('pr-phone').value);
-    fd.append('min_salary',  document.getElementById('pr-min-salary').value);
-    fd.append('keywords',    document.getElementById('pr-keywords').value);
-    fd.append('resume_text', document.getElementById('pr-resume-text').value);
-    fd.append('remote',      getRemote() ? '1' : '0');
-    var pdf = document.getElementById('pr-pdf').files[0];
-    if (pdf) fd.append('resume_pdf', pdf);
-    var btn = this;
-    btn.disabled = true; btn.textContent = 'Uploading…';
-    fetch('index.php?api=post_resume', { method: 'POST', body: fd })
-      .then(function(r){ return r.json(); })
-      .then(function(data){
-        if (data.ok) {
-          toast('Resume posted! ✓');
-          document.getElementById('pr-reset').click();
-          document.getElementById('toggleDropResumes').checked = false;
-        } else {
-          toast('Error: ' + (data.error || 'unknown'));
-        }
-      })
-      .catch(function(){ toast('Network error — try again.'); })
-      .finally(function(){ btn.disabled = false; btn.textContent = 'Submit'; });
+    var name       = document.getElementById('pr-name').value.trim();
+    var email      = document.getElementById('pr-email').value.trim();
+    var resumeText = document.getElementById('pr-resume-text').value.trim();
+    if (!name || !email || !resumeText) {
+      toast('Please add your name, email and résumé text.'); return;
+    }
+    if (!confirmPermanent('RÉSUMÉ')) return;
+    var body = new URLSearchParams({
+      tile:        getTile(),
+      name:        name,
+      email:       email,
+      phone:       document.getElementById('pr-phone').value,
+      min_salary:  document.getElementById('pr-min-salary').value,
+      keywords:    document.getElementById('pr-keywords').value,
+      resume_text: resumeText,
+      remote:      getRemote() ? '1' : '0'
+    });
+    postForm('index.php?api=post_resume', body, this, 'Submitting…', 'Résumé posted ✓ (live for ' + EXPIRY_DAYS + ' days)', 'toggleDropResumes', 'pr-reset');
   });
 
 }());
