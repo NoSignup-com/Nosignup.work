@@ -52,8 +52,13 @@ The entire panel toggling uses **hidden checkboxes** with sibling selectors (`~`
   zoom slider (around the laid point; disabled with a "drop a point first" tip until a
   point exists). Level 7 ≈ Europe fills the canvas. Zoom is not persisted.
 - **Capital dots**: black 1°×1° squares + small labels for ~196 national capitals
-  (Natural Earth, CC0), shown **only when zoomed in**; bigger capitals win label space
-  on collision. Includes Naypyidaw (Burma), Kathmandu (Nepal), Jolo (Sulu).
+  (Natural Earth, CC0) plus a curated set of self-determination / independence-movement
+  seats, shown **only when zoomed in**; bigger capitals win label space on collision.
+  Independence cases (city labelled with the nation): Naypyidaw (Burma), Kathmandu
+  (Nepal), Jolo (Sulu), Lhasa (Tibet), Laâyoune (W. Sahara), Ramallah (Palestine),
+  Erbil (Kurdistan), Taipei (Taiwan), Pristina (Kosovo), Hargeisa (Somaliland),
+  Barcelona (Catalonia), Edinburgh (Scotland), Grozny (Chechnya), Jayapura (West
+  Papua), Ürümqi (East Turkestan), Buka (Bougainville). Curated and easy to edit.
 - `localStorage` persistence (`nsw_tile`, `nsw_radius`, `nsw_remote`).
 - Carousel pagination (prev/next) – simple offset, fetches from API.
 
