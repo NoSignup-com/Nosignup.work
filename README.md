@@ -51,9 +51,14 @@ The entire panel toggling uses **hidden checkboxes** with sibling selectors (`~`
 - **Zoom (7 levels)** via mouse wheel / two-finger pinch (around the cursor), or the
   zoom slider (around the laid point; disabled with a "drop a point first" tip until a
   point exists). Level 7 ≈ Europe fills the canvas. Zoom is not persisted.
-- **Capital dots**: black 1°×1° squares + small labels for ~196 national capitals
-  (Natural Earth, CC0) plus a curated set of self-determination / independence-movement
-  seats, shown **only when zoomed in**; bigger capitals win label space on collision.
+- **Capital dots**: black 1°×1° squares + small labels for ~257 markers, shown **only
+  when zoomed in**; bigger capitals win label space on collision. These are the ~196
+  modern national capitals (Natural Earth, CC0), a curated set of self-determination /
+  independence-movement seats, and famous **historical/ancient capitals** across every
+  civilization (Tenochtitlan, Cusco, Babylon, Persepolis, Carthage, Angkor, Timbuktu,
+  Great Zimbabwe, Nan Madol, …). A historical seat that shares a modern marker's 1° tile
+  is **hyphenated onto it** (e.g. Mexico City-Tenochtitlan, Tokyo-Edo, Beijing-Khanbaliq,
+  Baghdad-Ctesiphon, Tunis-Carthage, Palikir-Nan Madol); otherwise it gets its own point.
   Independence cases (city labelled with the nation): Naypyidaw (Burma), Kathmandu
   (Nepal), Jolo (Sulu), Lhasa (Tibet), Laâyoune (W. Sahara), Ramallah (Palestine),
   Erbil (Kurdistan), Taipei (Taiwan), Pristina (Kosovo), Hargeisa (Somaliland),
