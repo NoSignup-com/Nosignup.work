@@ -48,6 +48,12 @@ The entire panel toggling uses **hidden checkboxes** with sibling selectors (`~`
 - Click → tile selection (`floor(lat)+"_"+floor(lon)`).
 - Radius slider (1–7, draws circle, radius = degree × ~111km).
 - “Include remote” checkbox.
+- **Zoom (7 levels)** via mouse wheel / two-finger pinch (around the cursor), or the
+  zoom slider (around the laid point; disabled with a "drop a point first" tip until a
+  point exists). Level 7 ≈ Europe fills the canvas. Zoom is not persisted.
+- **Capital dots**: black 1°×1° squares + small labels for ~196 national capitals
+  (Natural Earth, CC0), shown **only when zoomed in**; bigger capitals win label space
+  on collision. Includes Naypyidaw (Burma), Kathmandu (Nepal), Jolo (Sulu).
 - `localStorage` persistence (`nsw_tile`, `nsw_radius`, `nsw_remote`).
 - Carousel pagination (prev/next) – simple offset, fetches from API.
 

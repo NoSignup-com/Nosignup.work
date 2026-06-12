@@ -251,8 +251,10 @@ ARCHITECTURE (do not break):
 - The four quadrants AND the map overlay toggle via a pure-CSS checkbox hack.
   The hidden checkboxes MUST stay directly before the elements they reveal
   (the "~" sibling selectors depend on this DOM ordering).
-- JavaScript is required ONLY for the map (canvas grid, click->tile, radius slider,
-  remote toggle, localStorage). Everything else is HTML/CSS — keep it that way.
+- JavaScript drives the map (canvas world map, click->tile, radius + 7-level zoom
+  via wheel/pinch/slider, capital dots on zoom, remote toggle, localStorage), the
+  carousel fetches, the post forms, and mirror staging. Panel/overlay navigation
+  stays pure-CSS (checkbox hack) — keep it that way.
 
 PRESERVE (intentional — do NOT "fix"):
 - The .LeftArrow / .RightArrow nudge animations (@keyframes nudge-left / nudge-right).
@@ -441,6 +443,13 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
 .map-controls label{display:flex;align-items:center;gap:6px;cursor:pointer}
 .map-controls input[type=range]{width:160px;accent-color:#ffcc00}
 .map-controls input[type=checkbox]{accent-color:#ffcc00}
+/* zoom control + "drop a point first" tooltip when locked */
+.zoom-wrap{position:relative;display:flex;align-items:center;gap:6px}
+.zoom-wrap.locked input[type=range]{opacity:.35;cursor:not-allowed}
+.zoom-tip{display:none;position:absolute;left:50%;bottom:135%;transform:translateX(-50%);
+  background:#000;color:#ffcc00;border:1px solid #ffcc00;border-radius:6px;padding:4px 10px;
+  font-size:13px;white-space:nowrap;pointer-events:none;z-index:5}
+.zoom-wrap.locked:hover .zoom-tip{display:block}
 .selected-info{font-size:15px;color:#ffcc00;background:#0008;border-radius:999px;padding:5px 16px}
 .selected-info strong{font-size:17px}
 .close-map-label{background:var(--red);color:#fff;border:none;border-radius:999px;
@@ -612,6 +621,11 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
       <span>📍 Radius</span>
       <input type="range" id="radiusSlider" min="1" max="7" value="1" step="1">
       <span id="radiusValue">1</span>
+      <span class="zoom-wrap locked" id="zoomWrap">🔍 Zoom
+        <input type="range" id="zoomSlider" min="1" max="7" value="1" step="1" disabled>
+        <span id="zoomValue">1</span>
+        <span class="zoom-tip">drop a point first</span>
+      </span>
       <label><input type="checkbox" id="remoteToggle"> 🌐 Include remote</label>
     </div>
     <div class="selected-info">Selected tile: <strong id="selectedTileDisplay">—</strong></div>
@@ -670,6 +684,48 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
   mapImg.onload = function () { draw(); };
   mapImg.src = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzNjAgMTgwIiBwcmVzZXJ2ZUFzcGVjdFJhdGlvPSJub25lIj48cmVjdCB3aWR0aD0iMzYwIiBoZWlnaHQ9IjE4MCIgZmlsbD0iIzBlMmE0NyIvPjxwYXRoIGQ9Ik0xMjAgMTcxTDExNCAxNzFMMTE0IDE3MFpNMTkgMTcwTDE4IDE2OUwxNiAxNjlMMTcgMTY4TDE5IDE2OEwyMCAxNjlaTTEzNiAxNjhMMTM3IDE2OUwxMzcgMTcwTDEzNSAxNzBMMTMzIDE3MUwxMjYgMTcxTDEyNiAxNzBMMTI5IDE3MEwxMzEgMTY4Wk02MCAxNjRMNjEgMTYzTDYxIDE2NEw1NyAxNjRMNTggMTYzWk01NiAxNjRMNTQgMTY0TDUzIDE2M1pNODMgMTYyTDgzIDE2Mkw4MSAxNjJMNzkgMTYzTDc4IDE2MlpNMTExIDE2MkwxMTAgMTYyTDEwOSAxNjNMMTA4IDE2MkwxMDUgMTYyTDEwNiAxNjFMMTA4IDE2MUwxMDggMTYwTDEwOSAxNTlMMTEwIDE1OUwxMTEgMTYwTDExMSAxNjFaTTExOSAxNTRMMTE5IDE1NUwxMTcgMTU1TDExNyAxNTZMMTE3IDE1NkwxMTYgMTU3TDExNSAxNTdMMTE0IDE1OEwxMTUgMTU4TDExNSAxNTlMMTE3IDE1OUwxMTcgMTYwTDExOCAxNjBMMTE4IDE2MUwxMTkgMTYyTDExOSAxNjRMMTE4IDE2NEwxMTcgMTY1TDExNiAxNjVMMTE0IDE2NkwxMTAgMTY2TDEwOSAxNjdMMTA1IDE2N0wxMDYgMTY4TDEwMiAxNjhMMTAyIDE2OUwxMDMgMTcwTDEwNyAxNzBMMTA5IDE3MUwxMTQgMTcxTDExNyAxNzJMMTIwIDE3MkwxMjEgMTczTDEyNSAxNzNMMTI2IDE3MkwxMzggMTcyTDEzOSAxNzFMMTUwIDE3MUwxNTEgMTcwTDE1MCAxNzBMMTUwIDE2OUwxNDQgMTY5TDE0NCAxNjhMMTQ4IDE2OEwxNDkgMTY3TDE1MSAxNjdMMTUyIDE2NkwxNjAgMTY2TDE2MSAxNjVMMTYzIDE2NUwxNjQgMTY0TDE2NCAxNjRMMTY0IDE2M0wxNjcgMTYzTDE2OCAxNjJMMTY5IDE2MkwxNzAgMTYxTDE3MSAxNjFMMTcxIDE2MkwxNzMgMTYyTDE3MyAxNjFMMTc5IDE2MUwxODAgMTYyTDE4MSAxNjFMMTg1IDE2MUwxODYgMTYwTDE5MCAxNjBMMTkxIDE2MUwxOTIgMTYxTDE5MiAxNjBMMjAyIDE2MEwyMDMgMTYxTDIwNCAxNjFMMjA1IDE2MEwyMTIgMTYwTDIxMyAxNTlMMjE3IDE1OUwyMTggMTYwTDIyMCAxNjBMMjIwIDE1OUwyMjIgMTU5TDIyMyAxNThMMjI3IDE1OEwyMjggMTU3TDIzMSAxNTdMMjMyIDE1NkwyMzcgMTU2TDIzNyAxNTdMMjQwIDE1N0wyNDEgMTU4TDI0MyAxNThMMjQ0IDE1N0wyNDUgMTU4TDI0OSAxNThMMjUwIDE1OUwyNTAgMTYwTDI0OCAxNjBMMjQ4IDE2MUwyNDggMTYxTDI0OCAxNjJMMjUyIDE2MkwyNTIgMTYxTDI1MyAxNjFMMjUzIDE2MEwyNTcgMTYwTDI1OSAxNThMMjYxIDE1OEwyNjIgMTU3TDI2NyAxNTdMMjY4IDE1NkwyNjkgMTU3TDI4MSAxNTdMMjgyIDE1NkwyODUgMTU2TDI4NiAxNTdMMjkwIDE1N0wyOTEgMTU2TDI5NSAxNTZMMjk2IDE1N0wzMDIgMTU3TDMwMyAxNTZMMzA0IDE1N0wzMTAgMTU3TDMxMSAxNTZMMzE1IDE1NkwzMTUgMTU1TDMxNyAxNTdMMzI2IDE1N0wzMjYgMTU4TDMyOSAxNThMMzMwIDE1OUwzMzggMTU5TDMzOSAxNjBMMzQxIDE2MEwzNDIgMTYxTDM1MSAxNjFMMzUxIDE2MkwzNDkgMTY0TDM0NiAxNjRMMzQ2IDE2NUwzNDQgMTY1TDM0NCAxNjZMMzQzIDE2N0wzNDQgMTY3TDM0NCAxNjhMMzQ3IDE2OEwzNDcgMTY5TDM0MiAxNjlMMzQwIDE3MUwzNDEgMTcxTDM0MiAxNzJMMzQ0IDE3MkwzNDUgMTczTDM0OSAxNzNMMzQ5IDE3NEwzNTggMTc0TDM2MCAxNzVMMzYwIDE4MEwwIDE4MEwwIDE3NUwxIDE3NEw0IDE3NEw2IDE3NUw3IDE3NEwxMSAxNzRMMTMgMTc1TDI5IDE3NUwzMSAxNzZMMzQgMTc1TDMzIDE3NUwzMCAxNzRMMjYgMTc0TDI3IDE3M0wyNyAxNzJMMjUgMTcyTDI1IDE3MUwzMyAxNzFMMzQgMTcwTDMyIDE3MEwzMCAxNjlMMjQgMTY5TDIzIDE2OEwyMiAxNjhMMjIgMTY3TDMyIDE2N0wzNCAxNjZMMzQgMTY1TDM1IDE2NUwzNiAxNjZMMzcgMTY1TDQ0IDE2NUw0NSAxNjRMNTMgMTY0TDU1IDE2NUw1NiAxNjRMNTcgMTY0TDU5IDE2NUw2MCAxNjRMNjcgMTY0TDY4IDE2NUw2OSAxNjRMNzAgMTY1TDc5IDE2NUw3OSAxNjRMNzcgMTY0TDc3IDE2M0w4MiAxNjNMODIgMTY0TDg0IDE2NEw4NSAxNjNMOTUgMTYzTDk2IDE2NEw5OSAxNjRMOTkgMTYzTDEwMCAxNjNMMTAxIDE2NEwxMDIgMTYzTDEwMyAxNjRMMTA2IDE2NEwxMDcgMTYzTDExMiAxNjNMMTEzIDE2MkwxMTIgMTYxTDExMiAxNjBMMTExIDE2MEwxMTMgMTU4TDExMiAxNThMMTEyIDE1N0wxMTMgMTU3TDExNCAxNTZMMTE1IDE1NkwxMTYgMTU1TDExOCAxNTVMMTE5IDE1NEwxMjEgMTU0TDEyMSAxNTNMMTIyIDE1M0wxMjMgMTU0Wk0xMTQgMTQ0TDExNSAxNDVMMTEzIDE0NUwxMTIgMTQ2TDExMSAxNDVMMTA5IDE0NUwxMDggMTQ0TDEwNyAxNDRMMTA1IDE0M0wxMDYgMTQzTDEwOCAxNDRMMTA5IDE0NEwxMTAgMTQzTDExMiAxNDNaTTEyMiAxNDJMMTE5IDE0MkwxMjAgMTQxTDEyMSAxNDJaTTMyOCAxMzFMMzI4IDEzM0wzMjcgMTM0TDMyNiAxMzRMMzI1IDEzM1pNMzU0IDEzMUwzNTQgMTMyTDM1MyAxMzNMMzUzIDEzNEwzNTEgMTM0TDM1MSAxMzZMMzUwIDEzNkwzNDkgMTM3TDM0OCAxMzdMMzQ4IDEzNkwzNDcgMTM2TDM0NyAxMzVMMzQ4IDEzNEwzNTAgMTM0TDM1MiAxMzJMMzUyIDEzMUwzNTMgMTMwWk0zNTUgMTI3TDM1NiAxMjdMMzU2IDEyOEwzNTkgMTI4TDM1OCAxMjlMMzU3IDEyOUwzNTcgMTMxTDM1NiAxMzFMMzU1IDEzMkwzNTUgMTMwTDM1NCAxMzBMMzU0IDEyOUwzNTUgMTI5TDM1NSAxMjdMMzU0IDEyN0wzNTQgMTI2TDM1MyAxMjVMMzUzIDEyNFpNMzQ1IDExMkwzNDUgMTExTDM0NCAxMTBMMzQ1IDExMEwzNDUgMTExTDM0NiAxMTFaTTIzMCAxMDdMMjI5IDEwN0wyMjkgMTEwTDIyOCAxMTJMMjI4IDExNEwyMjcgMTE1TDIyNiAxMTVMMjI1IDExNkwyMjUgMTE1TDIyNCAxMTVMMjI0IDExNEwyMjMgMTEzTDIyMyAxMTFMMjI0IDExMUwyMjQgMTA2TDIyNiAxMDZMMjI3IDEwNUwyMjggMTA1TDIyOCAxMDRMMjI5IDEwM0wyMjkgMTAyTDIzMCAxMDJaTTMyNCAxMDVMMzI1IDEwNEwzMjUgMTA2TDMyNiAxMDdMMzI2IDEwOUwzMjcgMTA5TDMyOCAxMTBMMzI5IDExMEwzMjkgMTExTDMzMCAxMTJMMzMwIDExM0wzMzEgMTEyTDMzMSAxMTNMMzMzIDExNUwzMzMgMTE3TDMzNCAxMThMMzM0IDExOUwzMzMgMTE5TDMzMyAxMjJMMzMxIDEyNEwzMzEgMTI1TDMzMCAxMjZMMzMwIDEyN0wzMjkgMTI4TDMyNyAxMjhMMzI3IDEyOUwzMjUgMTI5TDMyNSAxMjhMMzI0IDEyOEwzMjQgMTI5TDMyMyAxMjlMMzIyIDEyOEwzMjEgMTI4TDMyMCAxMjdMMzIwIDEyNkwzMTggMTI2TDMxOCAxMjVMMzE3IDEyNUwzMTggMTI0TDMxOCAxMjNMMzE3IDEyNEwzMTYgMTI0TDMxNiAxMjVMMzE1IDEyNEwzMTUgMTIzTDMxNCAxMjNMMzEzIDEyMkwzMTIgMTIyTDMxMSAxMjFMMzEwIDEyMkwzMDYgMTIyTDMwNSAxMjNMMzA0IDEyM0wzMDQgMTI0TDMwMCAxMjRMMjk5IDEyNUwyOTkgMTI1TDI5NyAxMjVMMjk2IDEyNEwyOTUgMTI0TDI5NiAxMjNMMjk2IDEyMkwyOTUgMTIxTDI5NSAxMTlMMjk0IDExOEwyOTQgMTE3TDI5MyAxMTdMMjkzIDExNkwyOTMgMTE2TDI5NCAxMTZMMjk0IDExNUwyOTMgMTE0TDI5NCAxMTRMMjk0IDExM0wyOTUgMTEyTDI5NSAxMTFMMjk3IDExMUwyOTggMTEwTDMwMSAxMTBMMzAxIDEwOUwzMDIgMTA5TDMwMiAxMDdMMzAzIDEwNkwzMDMgMTA3TDMwNCAxMDdMMzA0IDEwNkwzMDUgMTA1TDMwNiAxMDVMMzA2IDEwNEwzMDggMTA0TDMwOCAxMDVMMzEwIDEwNUwzMDkgMTA0TDMxMCAxMDRMMzEwIDEwM0wzMTEgMTAzTDMxMSAxMDJMMzEzIDEwMkwzMTIgMTAxTDMxMyAxMDFMMzE0IDEwMkwzMTcgMTAyTDMxNyAxMDNMMzE2IDEwM0wzMTYgMTA0TDMxNSAxMDVMMzE2IDEwNUwzMTYgMTA2TDMxOCAxMDZMMzE4IDEwN0wzMTkgMTA3TDMyMCAxMDhMMzIxIDEwN0wzMjEgMTA2TDMyMiAxMDVMMzIyIDEwMUwzMjMgMTAxTDMyMyAxMDJMMzI0IDEwM1pNMzA0IDEwMEwzMDQgOTlMMzA1IDk5TDMwNiA5OEwzMDcgOThMMzA3IDk5TDMwNSA5OVpNMjkxIDk3TDI5MSA5NkwyOTMgOTdMMjkzIDk4TDI5NiA5OEwyOTUgOTlMMjkzIDk4TDI4OCA5OEwyODYgOTdMMjg1IDk3TDI4NiA5NkwyODggOTZaTTMzMSA5NkwzMjggOTZMMzI4IDk1TDMyOSA5NkwzMzAgOTZMMzMwIDk2TDMzMSA5NUwzMzIgOTVaTTMxNCA5M0wzMTUgOTNMMzE2IDkyTDMyMCA5MkwzMjEgOTNMMzIzIDkzTDMyNSA5NEwzMjYgOTVMMzI4IDk2TDMyOCA5N0wzMjcgOTdMMzI5IDk5TDMyOSAxMDBMMzMxIDEwMEwzMzEgMTAxTDMzMCAxMDFMMzMwIDEwMEwzMjggMTAwTDMyNiA5OEwzMjMgOThMMzIzIDk5TDMyMSA5OUwzMjAgOThMMzE4IDk4TDMxOSA5N0wzMTggOTZMMzE4IDk1TDMxNiA5NUwzMTUgOTRMMzEzIDk0TDMxMyA5M0wzMTIgOTNMMzEzIDkyTDMxMiA5MkwzMTEgOTFMMzEyIDkxTDMxMiA5MFpNMzA0IDkwTDMwMCA5MEwzMDAgOTFMMzAzIDkxTDMwMiA5MkwzMDIgOTRMMzAzIDk1TDMwMyA5NkwzMDIgOTVMMzAyIDk1TDMwMSA5NUwzMDIgOTRMMzAxIDk0TDMwMSA5M0wzMDAgOTNMMzAwIDk2TDI5OSA5NUwzMDAgOTRMMjk5IDkzTDI5OSA5MUwzMDAgOTBMMzAwIDg5TDMwNCA4OUwzMDUgODhaTTMwOSA5MEwzMDggOTBMMzA4IDkwTDMwNyA4OUwzMDggODhMMzA5IDg4Wk0yODUgOTZMMjgzIDk0TDI4MiA5NEwyODEgOTNMMjgxIDkyTDI3OSA5MEwyNzkgODhMMjc4IDg4TDI3NSA4NUwyNzcgODVMMjc4IDg2TDI3OSA4NkwyODEgODhMMjgyIDg4TDI4MiA4OUwyODMgODlMMjg0IDkwTDI4MyA5MUwyODQgOTFMMjg1IDkyTDI4NiA5MlpNMjk5IDg5TDI5OCA4OUwyOTcgOTBMMjk4IDkxTDI5NyA5MUwyOTcgOTJMMjk2IDk0TDI5NSA5NEwyOTQgOTNMMjkwIDkzTDI5MCA5MUwyODkgOTBMMjg5IDg5TDI5MCA4OEwyOTEgODhMMjkxIDg3TDI5MyA4N0wyOTQgODZMMjk0IDg1TDI5NSA4NUwyOTcgODNMMjk5IDg1TDI5OCA4NUwyOTkgODZMMjk4IDg2TDI5NyA4N1pNMzA3IDgzTDMwNiA4NEwzMDYgODNMMzA1IDgzTDMwNiA4NEwzMDQgODRMMzA0IDgyTDMwMyA4M0wzMDIgODNMMzAyIDgyTDMwMyA4MkwzMDMgODFMMzA0IDgyTDMwNSA4MUwzMDUgODBMMzA2IDgxWk0yNjAgODRMMjYwIDgwTDI2MiA4MkwyNjIgODRaTTI5NyA4MkwyOTggODFMMjk4IDgwTDI5OSA4MEwyOTkgODBaTTMwMyA3M0wzMDIgNzRMMzAyIDc2TDMwNCA3NkwzMDQgNzdMMzAzIDc3TDMwMyA3N0wzMDIgNzZMMzAxIDc2TDMwMSA3NkwzMDAgNzVMMzAwIDcyWk0xMTAgNzBMMTEwIDcxTDExMiA3MUwxMTEgNzJMMTA2IDcyTDEwNiA3MUwxMDcgNzFMMTA3IDcyTDEwOCA3MUwxMDcgNzFaTTEwMSA2OEwxMDIgNjdMMTAyIDY4TDEwMyA2OEwxMDMgNjlMMTA1IDY5TDEwNiA3MEwxMDMgNzBMMTAzIDY5TDEwMiA2OUwxMDEgNjhMOTggNjhMOTggNjdMOTcgNjdMOTcgNjhMOTYgNjhMOTYgNjdaTTMwMSA2OEwzMDAgNjdMMzAwIDY2TDMwMSA2NUwzMDIgNjVMMzAyIDY2Wk0xOTUgNTNMMTk0IDUzTDE5MiA1MlpNMzIxIDU0TDMyMCA1NUwzMTcgNTVMMzE2IDU3TDMxNSA1NkwzMTUgNTVMMzEzIDU2TDMxMSA1NkwzMTIgNTdMMzExIDU5TDMxMCA1OUwzMTAgNTdMMzA5IDU3TDMxMCA1NkwzMTEgNTZMMzEyIDU1TDMxMyA1NUwzMTUgNTRMMzE2IDU0TDMxNyA1M0wzMTkgNTJMMzIwIDUxTDMyMCA0OUwzMjEgNDlMMzIyIDUwTDMyMiA1MUwzMjEgNTJaTTMyNSA0NkwzMjYgNDdMMzI0IDQ3TDMyMyA0OEwzMjIgNDdMMzIxIDQ4TDMyMCA0OEwzMjAgNDdMMzIxIDQ3TDMyMiA0NUwzMjIgNDRaTTU2IDQyTDU0IDQxTDUzIDQwTDUyIDQwTDUyIDM5TDUzIDM5TDUzIDQwTDU1IDQwTDU1IDQxWk0xMjMgNDBMMTI0IDQwTDEyNSA0MUwxMjYgNDBMMTI3IDQxTDEyNyA0MUwxMjcgNDNMMTI2IDQzTDEyNiA0MkwxMjUgNDNMMTI1IDQzTDEyNCA0MkwxMjEgNDJMMTIxIDQxTDEyMiA0MUwxMjMgMzlMMTI0IDM4TDEyNSAzOFpNMzI1IDQxTDMyMyA0MUwzMjMgNDJMMzI0IDQzTDMyNCA0NEwzMjMgNDNMMzIyIDQ0TDMyMiAzN0wzMjMgMzZMMzIzIDM2TDMyMyAzOFpNMTcwIDM4TDE3MSAzN0wxNzAgMzZMMTcyIDM1TDE3NCAzNUwxNzQgMzdaTTE3NiAzMkwxNzggMzJMMTc4IDMzTDE3NyAzNEwxNzggMzRMMTgwIDM2TDE4MCAzN0wxODIgMzdMMTgyIDM4TDE4MSAzOEwxODEgMzlMMTc3IDM5TDE3NiA0MEwxNzQgNDBMMTc2IDM5TDE3NyAzOUwxNzUgMzhMMTc2IDM4TDE3NSAzN0wxNzcgMzdMMTc3IDM2TDE3NiAzNUwxNzUgMzVMMTc1IDM0TDE3NCAzNUwxNzQgMzJMMTc1IDMxWk0xMCAyNkwxMCAyN0w4IDI3Wk05NSAyNUw5NyAyNUw5OCAyNkwxMDAgMjZMOTkgMjdMOTcgMjZMOTYgMjZMOTQgMjdMOTQgMjZMOTQgMjZMOTQgMjRaTTE2NiAyNUwxNjUgMjZMMTYyIDI2TDE2MSAyN0wxNjAgMjZMMTU4IDI2TDE1NiAyNUwxNTggMjVMMTU2IDI0TDE2MiAyNEwxNjQgMjNaTTUgMjNMOCAyM0wxMCAyNEw5IDI0TDcgMjVMNyAyNkw2IDI2TDUgMjVMNCAyNUwzIDI0TDIgMjVMMSAyNEwwIDI0TDEgMjVMMCAyNUwwIDIxTDIgMjJaTTgwIDIxTDgxIDIwTDgzIDIwWk04OSAyMkw5MSAyMUw5MiAyMUw5MiAyMkw5MyAyM0w5NCAyMkw5NCAyMEw5NyAyMEw5OSAyMUw5OCAyMkw5OSAyMkw5OSAyM0w5NyAyNEw5NSAyNEw5NCAyM0w5NCAyNEw5MiAyNkw4OSAyNkw4OSAyN0w4OCAyN0w4NSAzMEw4NSAzMUw4NyAzMUw4NyAzMkw4OCAzM0w5MSAzM0w5MiAzNEw5NCAzNEw5NSAzNUw5OCAzNUw5OCAzN0wxMDAgMzlMMTAxIDM4TDEwMSAzNkwxMDAgMzVMMTAyIDM1TDEwMyAzNEwxMDMgMzJMMTAxIDMxTDEwMyAzMEwxMDIgMjlMMTAyIDI4TDEwMyAyN0wxMDQgMjhMMTA4IDI4TDEwOSAyOUwxMTAgMjlMMTEwIDMwTDExMSAzMUwxMTIgMzFMMTEyIDMyTDExNCAzMUwxMTUgMzBMMTE3IDMyTDExOSAzM0wxMTggMzRMMTIwIDM0TDEyMCAzNUwxMjMgMzVMMTIzIDM2TDEyNCAzNkwxMjQgMzhMMTIzIDM5TDEyMSAzOUwxMjAgNDBMMTEzIDQwTDExMSA0MUwxMDkgNDNMMTEwIDQzTDExMSA0MkwxMTMgNDFMMTE2IDQxTDExNSA0MkwxMTUgNDNMMTE2IDQ0TDExOCA0NEwxMTkgNDNMMTIwIDQ0TDExOSA0NUwxMTcgNDVMMTE2IDQ2TDExNCA0NkwxMTYgNDVMMTEzIDQ1TDExMiA0NkwxMTAgNDZMMTA5IDQ3TDEwOSA0OEwxMTAgNDhMMTA5IDQ5TDEwNiA0OUwxMDYgNTBMMTA1IDUxTDEwNSA1MUwxMDUgNTJMMTA0IDUzTDEwNCA1MUwxMDMgNTFMMTA0IDUyTDEwNCA1MkwxMDQgNTVMMTAzIDU1TDEwMiA1NkwxMDEgNTZMMTAxIDU3TDEwMCA1N0w5OSA1OEw5OSA2MkwxMDAgNjNMMTAwIDY1TDk5IDY1TDk5IDY0TDk4IDY0TDk4IDYzTDk3IDYzTDk3IDYxTDk2IDYwTDkxIDYwTDkxIDYxTDg5IDYxTDg4IDYwTDg2IDYwTDg1IDYxTDg0IDYxTDgzIDYyTDgzIDY0TDgyIDY1TDgyIDY4TDgzIDY5TDgzIDcwTDg0IDcxTDg1IDcxTDg2IDcyTDg3IDcxTDg5IDcxTDg5IDcwTDkwIDY5TDkyIDY5TDkzIDY4TDkzIDcwTDkyIDcwTDkzIDcxTDkyIDcxTDkyIDczTDkxIDc0TDk2IDc0TDk2IDc1TDk3IDc1TDk3IDc2TDk2IDc2TDk2IDc3TDk3IDc3TDk3IDc4TDk2IDc4TDk2IDc5TDk4IDgxTDEwMCA4MUwxMDAgODBMMTAxIDgwTDEwMSA4MUwxMDQgODFMMTA0IDgwTDEwNSA3OUwxMDcgNzlMMTA3IDc4TDEwOSA3OEwxMDggNzlMMTA4IDgxTDEwOSA4MUwxMDkgNzlMMTEwIDc5TDExMCA3OUwxMTQgNzlMMTE0IDgwTDExNiA4MEwxMTYgNzlMMTE4IDc5TDExNyA4MEwxMTggODBMMTE5IDgxTDEyMCA4MUwxMjAgODJMMTIxIDgyTDEyMiA4M0wxMjIgODRMMTI2IDg0TDEyNyA4NUwxMjggODVMMTI4IDg2TDEyOSA4NkwxMjkgODhMMTMwIDg4TDEzMCA4OUwxMjkgOTBMMTMxIDkwTDEzMSA5MUwxMzMgOTFMMTM1IDkyTDEzNiA5MkwxMzUgOTNMMTM3IDkyTDEzOSA5M0wxNDAgOTNMMTQxIDk0TDE0MyA5NUwxNDUgOTVMMTQ1IDk5TDE0MiAxMDJMMTQyIDEwM0wxNDEgMTAzTDE0MSAxMDhMMTQwIDEwOEwxNDAgMTEwTDEzOSAxMTFMMTM5IDExMkwxMzggMTEyTDEzOCAxMTNMMTM1IDExM0wxMzUgMTE0TDEzNCAxMTRMMTMyIDExNUwxMzIgMTE2TDEzMSAxMTdMMTMyIDExN0wxMzEgMTE4TDEzMSAxMTlMMTMwIDExOUwxMjkgMTIxTDEyNyAxMjNMMTI3IDEyNEwxMjYgMTI0TDEyNSAxMjVMMTI0IDEyNUwxMjMgMTI0TDEyMiAxMjRMMTIzIDEyNUwxMjMgMTI3TDEyMSAxMjlMMTE4IDEyOUwxMTggMTMxTDExNSAxMzFMMTE1IDEzMkwxMTYgMTMyTDExNyAxMzNMMTE1IDEzM0wxMTUgMTM1TDExMyAxMzVMMTEzIDEzNkwxMTIgMTM2TDExMyAxMzdMMTE0IDEzN0wxMTQgMTM4TDExMiAxNDBMMTExIDE0MEwxMTEgMTQyTDExMSAxNDJMMTEwIDE0M0wxMDkgMTQzTDEwOSAxNDRMMTA3IDE0NEwxMDUgMTQyTDEwNSAxNDBMMTA0IDEzOUwxMDYgMTM3TDEwNCAxMzdMMTA1IDEzNkwxMDYgMTM0TDEwNyAxMzRMMTA3IDEzMkwxMDYgMTMzTDEwNiAxMzBMMTA3IDEyOUwxMDYgMTI4TDEwNiAxMjdMMTA3IDEyN0wxMDcgMTI2TDEwOSAxMjJMMTA4IDEyMUwxMDkgMTIwTDEwOSAxMTZMMTEwIDExNEwxMTAgMTA4TDEwOSAxMDhMMTA5IDEwN0wxMDUgMTA1TDEwNCAxMDVMMTA0IDEwNEwxMDEgOThMMTAwIDk3TDk5IDk3TDk5IDk0TDEwMCA5M0wxMDAgOTNMOTkgOTJMOTkgOTFMMTAwIDkwTDEwMCA4OUwxMDEgODlMMTAxIDg4TDEwMyA4NkwxMDMgODVMMTAyIDg0TDEwMyA4NEwxMDMgODNMMTAyIDgzTDEwMiA4MkwxMDEgODFMMTAwIDgxTDEwMCA4M0w5OSA4M0w5OSA4Mkw5NiA4Mkw5NiA4MUw5NSA4MEw5NCA4MEw5NCA3OUw5MiA3N0w5MSA3N0w5MCA3Nkw4OCA3Nkw4OCA3NUw4NyA3NEw4MiA3NEw4MSA3M0w3OSA3M0w3OCA3Mkw3NiA3Mkw3NiA3MUw3NSA3MUw3NSA3MEw3NCA3MEw3NSA2OUw3NSA2OUw3NCA2OEw3NCA2N0w2OSA2Mkw2OCA2Mkw2OCA2MUw2NyA2MEw2NyA1OUw2NiA1OEw2NSA1OEw2NSA2MEw2NiA2MEw2NiA2MUw2NyA2MUw2NyA2Mkw2OCA2Mkw2OCA2M0w2OSA2NEw2OSA2Nkw3MCA2Nkw3MSA2N0w3MCA2N0w2OSA2Nkw2OCA2Nkw2OCA2NEw2NyA2NEw2NyA2M0w2NiA2M0w2NSA2Mkw2NiA2Mkw2NiA2MUw2NSA2MUw2NCA2MEw2NCA1OUw2MyA1OEw2MyA1N0w2MiA1Nkw2MCA1Nkw1OCA1NEw1NyA1Mkw1NiA1MUw1NiA0OEw1NSA0N0w1NiA0Nkw1NiA0Mkw1NyA0Mkw1NyA0M0w1OCA0M0w1OCA0Mkw1NyA0MUw1NSA0MEw1NCA0MEw1MSAzN0w1MSAzNkw0OSAzNkw0OSAzNUw0OCAzNUw0OCAzNEw0NiAzM0w0NiAzMkw0MyAzMkw0MiAzMUw0MCAzMEwzNCAzMEwzMyAyOUwzMiAyOUwzMiAzMEwzMCAzMEwyOSAzMUwyOCAzMUwyOCAzMEwyOSAyOUwyOCAyOUwyNiAzMUwyNyAzMUwyNiAzMkwyNSAzMkwyNCAzM0wyMyAzM0wyMiAzNEwyMCAzNEwxOSAzNUwxNyAzNUwxNSAzNkwxNSAzNUwxNyAzNUwxOCAzNEwyMCAzNEwyMSAzM0wyMiAzM0wyMiAzMkwyMyAzMUwyMSAzMUwyMSAzMkwyMCAzMUwxOCAzMUwxOCAzMEwxNSAzMEwxNSAyOUwxNCAyOEwxNSAyN0wxNyAyN0wxOCAyNkwxOCAyN0wxOSAyNkwxOCAyNkwxOSAyNUwxOCAyNUwxNyAyNkwxNiAyNUwxNSAyNkwxNCAyNUwxMyAyNUwxMiAyNEwxMyAyNEwxNiAyM0wxNiAyNEwxOCAyNEwxOCAyM0wxNiAyM0wxNiAyMkwxMyAyMkwxNCAyMUwxNyAyMUwxNyAyMEwxOSAyMEwyMSAxOUwyOCAxOUwyOSAyMEwzMCAxOUwzMiAyMEwzOSAyMEw0MSAyMUw0NCAyMUw0NiAyMEw1MyAyMEw1NCAyMUw1NiAyMEw1NiAyMUw1NyAyMEw1OSAyMEw2MCAyMUw2NSAyMUw2NiAyMkw3MCAyMkw3MSAyM0w3MiAyMkw3MSAyMkw3MiAyMUw3NSAyMUw3NiAyMkw4MSAyMkw4MiAyMUw4NCAyMkw4NCAyM0w4NiAyMUw4NSAyMEw4NCAyMEw4NCAxOUw4NSAxOEw4NiAxOFpNNjggMTdMNjkgMThMNzAgMTdMNzEgMTdMNzIgMThMNzIgMTdMNzUgMTdMNzUgMThMNzcgMjBMNzcgMjBMNzggMjFMNjQgMjFMNjMgMjBMNjggMjBMNjYgMTlMNjIgMTlMNjEgMThMNjIgMTdaTTk5IDE3TDk5IDE2TDEwMiAxNlpNOTUgMTdMOTggMTZMOTkgMTdMOTkgMThMMTAxIDE4TDEwMiAxN0wxMDQgMThMMTA2IDE4TDEwNiAxOUwxMDggMThMMTA5IDE5TDExMSAxOUwxMTMgMjFMMTExIDIxTDExNCAyMkwxMTUgMjJMMTE3IDIzTDExOCAyM0wxMTggMjRMMTE2IDI1TDExNSAyNUwxMTMgMjRMMTEyIDI0TDExMyAyNUwxMTQgMjVMMTE1IDI2TDExNSAyN0wxMTQgMjdMMTExIDI2TDExMyAyN0wxMTQgMjhMMTExIDI4TDEwOSAyN0wxMDggMjdMMTA4IDI2TDEwNyAyNkwxMDUgMjVMMTA1IDI2TDEwMiAyNkwxMDEgMjVMMTA2IDI1TDEwNiAyNEwxMDcgMjNMMTA3IDIyTDEwNSAyMUwxMDQgMjFMMTAzIDIwTDkxIDIwTDkwIDE5TDkwIDE5TDkwIDE4TDkyIDE2TDk0IDE2Wk04MyAxNkw4MyAxN0w4MyAxN0w4MyAxOEw4MiAxOUw4MSAxOUw4MCAxOEw3OCAxN0w3OCAxN1pNMzIwIDE3TDMyMSAxNkwzMjIgMTZMMzIzIDE3Wk04NiAxOEw4NSAxOEw4NCAxN0w4NSAxNkw4OSAxNkw4OCAxN1pNNTYgMTlMNTQgMThMNTYgMTZMNjMgMTZMNjQgMTdMNjEgMTdMNjAgMThaTTMyNCAxNUwzMTcgMTVMMzE4IDE0Wk04MiAxNUw3OSAxNUw3OSAxNEw3OSAxNEw4MCAxM1pNNzQgMTRMNzQgMTVMNzAgMTVMNjggMTZMNjYgMTZMNjYgMTVMNjIgMTVMNjQgMTRMNjkgMTRMNzEgMTVMNzAgMTRMNzAgMTNMNzEgMTNaTTIzMiAxOUwyMzEgMThMMjMyIDE4TDIzMiAxN0wyMzggMTRMMjQ0IDE0TDI0NiAxM0wyNDkgMTNMMjQ4IDE0TDI0NSAxNEwyNDIgMTVMMjM4IDE2TDIzNyAxN0wyMzUgMThMMjM2IDE4Wk04OCAxM0w4OSAxNEw5MiAxNEw5NCAxNUw5NSAxNEw5OSAxNEwxMDAgMTVMOTggMTZMOTcgMTVMOTQgMTZMOTIgMTZMOTAgMTVMODcgMTVMODcgMTRMODQgMTRMODMgMTNaTTY0IDEzTDYzIDEzTDYyIDE0TDU3IDE0TDYxIDEyTDYyIDEzWk0yODcgMTRMMjg4IDEzTDI5MSAxM0wyOTMgMTRMMjk0IDE0TDI5NCAxNUwyOTMgMTVMMjkwIDE2TDI5MyAxNkwyOTQgMTdMMjk0IDE2TDI5OSAxNkwyOTkgMTdMMzAzIDE3TDMwMyAxNkwzMDcgMTZMMzA5IDE3TDMwOSAxOEwzMDggMThMMzEwIDE5TDMxMSAxOUwzMTIgMThMMzE0IDE5TDMxNiAxOEwzMTcgMTlMMzE4IDE4TDMyMCAxOUwzMTkgMThMMzIwIDE3TDMzMCAxOEwzMzMgMTlMMzM5IDE5TDM0MSAyMUwzNDIgMjBMMzQ0IDIwTDM0NiAyMUwzNDggMjBMMzUwIDIxTDM1MSAyMUwzNTAgMjBMMzU2IDIwTDM1OSAyMUwzNjAgMjFMMzYwIDI1TDM1NyAyNUwzNTkgMjdMMzU5IDI4TDM1NyAyN0wzNTUgMjhMMzU0IDI4TDM1MiAyOUwzNTEgMzBMMzUwIDMwTDM0OSAyOUwzNDYgMzBMMzQ0IDMwTDM0MiAzMkwzNDMgMzJMMzQzIDM0TDM0MiAzNEwzNDIgMzVMMzQwIDM2TDM0MCAzN0wzMzkgMzdMMzM3IDM5TDMzNiAzOEwzMzYgMzdMMzM1IDM1TDMzNiAzM0wzMzcgMzNMMzM3IDMyTDMzOCAzMkwzNDQgMjlMMzQ0IDI3TDM0MyAyOEwzNDAgMjlMMzM5IDI4TDMzNyAyOUwzMzQgMzBMMzM1IDMxTDMzMSAzMUwzMzEgMzBMMzMwIDMwTDMyOSAzMUwzMjIgMzFMMzE5IDMzTDMxNSAzNUwzMTcgMzVMMzE3IDM2TDMyMCAzNkwzMjEgMzdMMzIxIDQwTDMyMCA0MkwzMTUgNDdMMzExIDQ3TDMxMSA0OEwzMTAgNDhMMzEwIDQ5TDMwOSA0OUwzMDkgNTBMMzA4IDUwTDMwOCA1MUwzMDggNTFMMzA5IDUzTDMwOSA1NUwzMDggNTVMMzA3IDU2TDMwNiA1NkwzMDYgNTVMMzA3IDU0TDMwNiA1M0wzMDcgNTNMMzA2IDUyTDMwNSA1MkwzMDUgNTBMMzAzIDUwTDMwMiA1MUwzMDIgNTFMMzAxIDUwTDMwMiA1MEwzMDIgNDlMMzAxIDQ5TDI5OSA1MUwyOTggNTFMMjk4IDUyTDI5OSA1MkwyOTkgNTNMMzAwIDUzTDMwMSA1MkwzMDIgNTNMMzAxIDUzTDMwMSA1NEwzMDAgNTRMMjk5IDU1TDMwMSA1N0wzMDEgNThMMzAyIDU4TDMwMiA1OUwzMDEgNTlMMzAyIDYwTDMwMiA2MkwzMDEgNjJMMzAwIDYzTDMwMCA2NEwyOTkgNjVMMjk3IDY2TDI5NiA2N0wyOTUgNjdMMjk0IDY4TDI5NCA2N0wyOTMgNjhMMjkyIDY4TDI5MCA3MEwyOTAgNjlMMjg5IDY4TDI4OCA2OEwyODYgNzBMMjg2IDcyTDI4OSA3NUwyODkgNzhMMjg3IDgwTDI4NiA4MEwyODUgODFMMjg1IDgwTDI4NCA4MEwyODMgNzlMMjgzIDc4TDI4MiA3N0wyODAgNzdMMjgwIDc4TDI3OSA3OUwyNzkgODFMMjgwIDgxTDI4MCA4M0wyODIgODNMMjgyIDg0TDI4MyA4NEwyODMgODdMMjg0IDg3TDI4NCA4OUwyODMgODhMMjgxIDg3TDI4MSA4NUwyODAgODVMMjgwIDgzTDI3OSA4MkwyNzggODJMMjc4IDgxTDI3OSA4MEwyNzggNzlMMjc5IDc5TDI3OCA3OEwyNzkgNzdMMjc4IDc2TDI3OCA3NEwyNzcgNzNMMjc3IDc0TDI3NCA3NEwyNzUgNzNMMjc0IDcyTDI3NCA3MEwyNzMgNzBMMjcyIDY5TDI3MiA2OEwyNzEgNjdMMjcwIDY3TDI3MSA2OEwyNjggNjhMMjY0IDcyTDI2MyA3MkwyNjIgNzNMMjYyIDc0TDI2MCA3NEwyNjAgODBMMjU5IDgwTDI1OSA4MUwyNTggODFMMjU4IDgyTDI1NiA4MEwyNTYgNzlMMjU1IDc4TDI1NSA3NkwyNTQgNzVMMjU0IDc0TDI1MyA3MkwyNTMgNjlMMjUwIDY5TDI0OSA2OEwyNTAgNjhMMjQ4IDY2TDI0NyA2NkwyNDcgNjVMMjQwIDY1TDIzOSA2NEwyMzcgNjRMMjM3IDYzTDIzNiA2M0wyMzUgNjRMMjMzIDYzTDIzMCA2MEwyMjggNjBMMjI4IDYxTDIyOSA2MkwyMjkgNjNMMjMwIDYzTDIzMCA2NEwyMzEgNjVMMjMxIDY0TDIzMiA2NEwyMzIgNjVMMjMxIDY1TDIzMiA2NkwyMzQgNjZMMjM2IDY0TDIzNiA2NUwyMzcgNjZMMjM5IDY2TDIzOSA2N0wyNDAgNjdMMjQwIDY4TDIzOSA2OEwyMzkgNjlMMjM4IDcwTDIzOCA3MUwyMzcgNzFMMjM3IDcyTDIzNSA3MkwyMzUgNzNMMjMzIDczTDIzMSA3NUwyMzAgNzVMMjI5IDc2TDIyNyA3NkwyMjcgNzdMMjIzIDc3TDIyMyA3M0wyMjIgNzNMMjIyIDcyTDIxOSA2OUwyMTkgNjdMMjE4IDY2TDIxNyA2NkwyMTcgNjRMMjE1IDYyTDIxNSA2MUwyMTQgNjJMMjEzIDYyTDIxMiA2MEwyMTMgNjFMMjEzIDYyTDIxNCA2NEwyMTYgNjZMMjE1IDY2TDIxNyA2OEwyMTcgNzFMMjE5IDczTDIxOSA3NEwyMjEgNzZMMjIyIDc2TDIyMiA3N0wyMjMgNzdMMjIzIDc5TDIyNCA3OUwyMjQgODBMMjI1IDgwTDIyNiA3OUwyMjkgNzlMMjMwIDc4TDIzMSA3OEwyMzEgODFMMjI5IDgzTDIyOSA4NUwyMjYgODhMMjI0IDg5TDIyMiA5MUwyMjIgOTJMMjIxIDkyTDIyMCA5M0wyMjAgOTRMMjE5IDk1TDIxOSA5OEwyMjAgOTlMMjIwIDEwMkwyMjEgMTAzTDIyMSAxMDVMMjIwIDEwNUwyMjAgMTA2TDIxOSAxMDdMMjE3IDEwOEwyMTUgMTEwTDIxNSAxMTJMMjE2IDExMkwyMTYgMTEzTDIxNSAxMTRMMjE1IDExNEwyMTQgMTE1TDIxMyAxMTVMMjEzIDExN0wyMTIgMTE4TDIxMiAxMTlMMjExIDExOUwyMTEgMTIwTDIwOCAxMjNMMjA3IDEyM0wyMDYgMTI0TDIwMSAxMjRMMjAwIDEyNUwxOTkgMTI0TDE5OCAxMjRMMTk4IDEyMUwxOTYgMTE5TDE5NiAxMThMMTk1IDExN0wxOTUgMTE1TDE5NCAxMTRMMTk0IDExMkwxOTMgMTExTDE5MyAxMDlMMTkyIDEwOEwxOTIgMTA0TDE5MyAxMDRMMTkzIDEwMkwxOTQgMTAyTDE5NCAxMDFMMTkzIDEwMEwxOTMgOTdMMTkyIDk2TDE5MiA5NUwxODkgOTJMMTg5IDg5TDE5MCA4OEwxOTAgODdMMTg5IDg2TDE4OCA4NkwxODkgODVMMTg3IDg2TDE4NiA4NkwxODUgODVMMTg1IDg0TDE4MSA4NEwxNzkgODVMMTczIDg1TDE3MiA4NkwxNzAgODRMMTY5IDg0TDE2OSA4M0wxNjggODNMMTY3IDgyTDE2NyA4MUwxNjYgODFMMTY2IDgwTDE2NSA4MEwxNjUgNzlMMTY0IDc5TDE2NCA3OEwxNjMgNzhMMTYzIDc2TDE2MiA3NUwxNjMgNzVMMTYzIDc0TDE2NCA3NEwxNjMgNzNMMTY0IDczTDE2NCA3MEwxNjMgNjlMMTYzIDY4TDE2NCA2N0wxNjQgNjZMMTY1IDY2TDE2NSA2NEwxNjYgNjRMMTY2IDYzTDE2NyA2MkwxNjggNjJMMTY5IDYxTDE3MCA2MUwxNzAgNTlMMTcxIDU4TDE3MSA1N0wxNzIgNTZMMTczIDU2TDE3NCA1NUwxNzQgNTRMMTc1IDU0TDE3NSA1NUwxNzggNTVMMTc5IDU0TDE4MSA1NEwxODEgNTNMMTkxIDUzTDE5MSA1NUwxOTAgNTZMMTkxIDU2TDE5MSA1N0wxOTQgNTdMMTk2IDU5TDE5OCA1OUwxOTkgNjBMMjAwIDU5TDIwMCA1OEwyMDEgNTdMMjAzIDU3TDIwMyA1OEwyMDYgNThMMjA3IDU5TDIxMCA1OUwyMTEgNThMMjEyIDU5TDIxNCA1OUwyMTUgNThMMjE1IDU4TDIxNSA1NkwyMTYgNTVMMjE2IDUzTDIxNSA1M0wyMTQgNTRMMjEzIDU0TDIxMiA1M0wyMTEgNTNMMjEwIDU0TDIwOSA1M0wyMDggNTNMMjA3IDUyTDIwNiA1MkwyMDcgNTFMMjA2IDUxTDIwNyA1MEwyMDkgNTBMMjA5IDQ5TDIxMSA0OUwyMTIgNDhMMjE1IDQ4TDIxNyA0OUwyMjAgNDlMMjIyIDQ4TDIyMSA0N0wyMjAgNDdMMjE4IDQ1TDIxNyA0NUwyMTggNDRMMjE4IDQzTDIxNiA0M0wyMTUgNDRMMjE2IDQ1TDIxNSA0NUwyMTQgNDZMMjEzIDQ1TDIxMiA0NUwyMTMgNDRMMjEyIDQ0TDIxMiA0M0wyMTEgNDNMMjEwIDQ0TDIxMCA0NUwyMDkgNDVMMjA5IDQ2TDIwOCA0N0wyMDggNDhMMjA5IDQ5TDIwNyA0OUwyMDYgNTBMMjA2IDQ5TDIwNCA0OUwyMDQgNTBMMjAzIDUwTDIwMyA1MUwyMDQgNTFMMjA0IDUyTDIwMyA1MkwyMDMgNTRMMjAyIDU0TDIwMiA1M0wyMDEgNTJMMjAxIDUxTDIwMCA1MUwyMDAgNTBMMTk5IDUwTDE5OSA0OUwyMDAgNDhMMTk4IDQ4TDE5OCA0N0wxOTcgNDdMMTk2IDQ2TDE5NSA0NkwxOTUgNDVMMTk0IDQ1TDE5NCA0NEwxOTMgNDRMMTkyIDQ1TDE5MyA0NkwxOTQgNDZMMTk0IDQ3TDE5NSA0OEwxOTYgNDhMMTk3IDQ5TDE5OCA0OUwxOTggNTBMMTk2IDUwTDE5NyA1MUwxOTYgNTJMMTk2IDUwTDE5NSA1MEwxOTUgNDlMMTkzIDQ5TDE5MiA0OEwxOTEgNDhMMTkxIDQ3TDE5MCA0NkwxODcgNDZMMTg3IDQ3TDE4MyA0N0wxODMgNDhMMTgyIDQ5TDE4MSA0OUwxODAgNTBMMTgwIDUyTDE3OSA1MkwxNzkgNTNMMTc2IDUzTDE3NSA1NEwxNzQgNTRMMTczIDUzTDE3MSA1M0wxNzEgNTJMMTcwIDUxTDE3MSA1MUwxNzEgNDdMMTcyIDQ2TDE3NSA0NkwxNzYgNDdMMTc4IDQ3TDE3OSA0NkwxNzkgNDRMMTc3IDQyTDE3NiA0MkwxNzUgNDFMMTc4IDQxTDE3OCA0MEwxNzkgNDFMMTgxIDQwTDE4MiAzOUwxODMgMzlMMTg2IDM2TDE4NyAzN0wxODcgMzZMMTg5IDM2TDE4OSAzNUwxODggMzRMMTg4IDMzTDE5MCAzM0wxOTEgMzJMMTkxIDMzTDE5MCAzM0wxOTEgMzRMMTkwIDM0TDE5MCAzNUwxOTEgMzZMMTk1IDM2TDE5NiAzNUwxOTkgMzVMMTk5IDM2TDIwMCAzNkwyMDAgMzVMMjAxIDM1TDIwMSAzM0wyMDIgMzNMMjAzIDMyTDIwMyAzM0wyMDQgMzNMMjA0IDMyTDIwMyAzMUwyMDUgMzFMMjA2IDMwTDIwNyAzMUwyMDggMzFMMjA5IDMwTDIwOCAyOUwyMDYgMzBMMjAyIDMwTDIwMSAyOUwyMDIgMjhMMjAxIDI3TDIwMiAyN0wyMDIgMjZMMjA1IDI1TDIwNSAyNEwyMDIgMjRMMjAxIDI1TDIwMSAyNkwyMDAgMjZMMTk4IDI3TDE5NyAyOUwxOTggMjlMMTk5IDMwTDE5OCAzMUwxOTcgMzFMMTk2IDMzTDE5NiAzNEwxOTUgMzRMMTk0IDM1TDE5MyAzNUwxOTMgMzRMMTkyIDMzTDE5MSAzMUwxOTAgMzFMMTg4IDMyTDE4NyAzMkwxODUgMzBMMTg1IDI4TDE4NiAyN0wxODkgMjdMMTkxIDI2TDE5MiAyNEwxOTUgMjJMMTk2IDIxTDE5OSAyMEwyMDMgMjBMMjA1IDE5TDIwOCAxOUwyMTEgMjBMMjEyIDIwTDIxNCAyMUwyMTcgMjFMMjIwIDIyTDIyMSAyM0wyMjAgMjRMMjE4IDI0TDIxNCAyM0wyMTMgMjNMMjE1IDI0TDIxNSAyNkwyMTcgMjZMMjE3IDI1TDIyMCAyNUwyMjIgMjRMMjI0IDI0TDIyNSAyM0wyMjQgMjNMMjI0IDIyTDIyMyAyMUwyMjYgMjJMMjI2IDIyTDIyNiAyM0wyMjggMjNMMjI4IDIyTDIzMCAyMkwyMzQgMjFMMjMzIDIyTDIzNyAyMkwyMzkgMjFMMjQwIDIyTDI0MSAyMUwyNDAgMjBMMjQ0IDIwTDI0NSAyMUwyNDkgMjJMMjQ5IDIxTDI0NyAyMUwyNDcgMTlMMjQ5IDE4TDI0OSAxN0wyNTMgMTdMMjUzIDE4TDI1MiAxOUwyNTMgMjBMMjUzIDIxTDI1NCAyMkwyNTMgMjJMMjUxIDI0TDI1MiAyNEwyNTMgMjNMMjU0IDIzTDI1NSAyMkwyNTQgMjJMMjU1IDIxTDI1NCAyMUwyNTQgMTlMMjUzIDE5TDI1NSAxOEwyNTUgMTdMMjU2IDE4TDI1NSAxOUwyNTYgMTlMMjU2IDE4TDI2MiAxOEwyNjEgMTdMMjYxIDE2TDI2NiAxNkwyNjcgMTVMMjY4IDE1TDI3MCAxNEwyODEgMTRMMjgxIDEzTDI4MiAxM0wyODQgMTJMMjg2IDEzWk04MSAxMkw4MSAxMUw4MyAxMVpNNzUgMTJMNzYgMTFMNzkgMTFaTTI3OSAxMkwyODEgMTFMMjg1IDExWk0yMDIgMTFMMTk5IDExTDE5NyAxM0wxOTQgMTNMMTk1IDEyTDE5MyAxMkwxOTEgMTFMMTkwIDEwWk0yMDYgMTBMMjAzIDExTDIwMCAxMEwxOTcgMTBMMjAwIDlMMjAyIDEwTDIwMyA5Wk0yMzAgMTBMMjI3IDEwTDIyNyA5Wk0yNzMgMTFMMjczIDEwTDI3MSAxMEwyNzQgOUwyNzggOUwyODAgMTBaTTk0IDExTDkzIDExTDkxIDEyTDg3IDEyTDg2IDExTDg1IDExTDg0IDEwTDgzIDEwTDg0IDlMOTEgOUw5MiAxMFpNMTE4IDdMMTE4IDhMMTE1IDhMMTEyIDlMMTExIDlMMTA5IDEwTDEwNyAxMEwxMDYgMTFMMTA1IDExTDEwNCAxMkwxMDIgMTJMMTAwIDEzTDEwMiAxM0w5OSAxNEw5MSAxNEw5MCAxM0w5MiAxM0w5MiAxMkw5MiAxMkw5MyAxMUw5NSAxMUw5MyAxMEw5OCAxMEw5NiA5TDkwIDlMODkgOEw5MyA4TDk1IDdMOTYgN0w5NyA4TDk4IDdaTTE1OSA3TDE1NyA4TDE1OCA4TDE1NyA5TDE1OSA4TDE2NyA4TDE2OCA5TDE2NCA5TDE2MyAxMEwxNjIgMTBMMTYxIDExTDE2MCAxMUwxNjAgMTJMMTYyIDEzTDE1OCAxM0wxNjAgMTRMMTYwIDE1TDE1OSAxNUwxNjEgMTZMMTYwIDE2TDE1OSAxN0wxNTggMTdMMTU4IDE4TDE1NiAxN0wxNTUgMThMMTU3IDE4TDE1OCAxOUwxNTYgMjBMMTU2IDE5TDE1NSAxOUwxNTQgMjBMMTU4IDIwTDE1MiAyMkwxNDcgMjJMMTQ2IDIzTDE0NCAyNEwxNDIgMjRMMTQwIDI1TDEzOSAyNUwxMzkgMjdMMTM3IDI3TDEzOCAyOEwxMzcgMjlMMTM3IDMwTDEzNSAzMEwxMzQgMjlMMTMxIDI5TDEyOCAyNkwxMjggMjVMMTI2IDI0TDEyNyAyM0wxMjYgMjNMMTI3IDIyTDEyOSAyMUwxMjkgMjBMMTI4IDIwTDEyNyAyMUwxMjUgMjBMMTI2IDE5TDEyNyAxOUwxMjYgMThMMTI1IDE5TDEyNCAxOEwxMjUgMTdMMTIzIDE1TDEyMSAxNUwxMjEgMTRMMTEwIDE0TDEwOSAxM0wxMTMgMTNMMTA5IDEyTDEwNyAxMkwxMTEgMTFMMTE0IDExTDExNSAxMEwxMTIgMTBMMTEzIDlMMTE4IDlMMTE3IDhMMTMzIDhMMTMzIDdMMTQwIDdMMTQxIDZaIiBmaWxsPSIjM2Y3ZDRlIiBzdHJva2U9IiM1ZmE4NmEiIHN0cm9rZS13aWR0aD0iLjQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48L3N2Zz4=';
 
+  /* world capitals [name, lon, lat], biggest first — drawn only when zoomed in */
+  var CAPITALS = [["Tokyo",139.75,35.69],["Mexico City",-99.13,19.44],["Dhaka",90.41,23.73],["Buenos Aires",-58.4,-34.6],["Cairo",31.25,30.05],["Beijing",116.39,39.93],["Manila",120.98,14.61],["Moscow",37.61,55.75],["Paris",2.33,48.87],["Seoul",127,37.57],["Jakarta",106.83,-6.17],["London",-0.12,51.5],["Lima",-77.05,-12.05],["Tehran",51.42,35.67],["Kinshasa",15.31,-4.33],["Bogota",-74.09,4.6],["Taipei",121.57,25.04],["Bangkok",100.51,13.75],["Santiago",-70.67,-33.45],["Madrid",-3.69,40.4],["Singapore",103.85,1.29],["Luanda",13.23,-8.84],["Baghdad",44.39,33.34],["Khartoum",32.53,15.59],["Riyadh",46.77,24.64],["Hanoi",105.85,21.04],["Washington,  D.C.",-77.01,38.9],["Brasília",-47.92,-15.78],["Ankara",32.86,39.93],["Berlin",13.4,52.52],["Algiers",3.05,36.77],["Rome",12.48,41.9],["Pyongyang",125.75,39.02],["Kabul",69.18,34.52],["Athens",23.73,37.99],["Addis Ababa",38.7,9.04],["Nairobi",36.81,-1.28],["Caracas",-66.92,10.5],["Dar es Salaam",39.27,-6.8],["Lisbon",-9.15,38.72],["Kyiv",30.51,50.44],["Dakar",-17.48,14.72],["Damascus",36.3,33.5],["Tunis",10.18,36.8],["Vienna",16.36,48.2],["Tripoli",13.18,32.89],["Tashkent",69.29,41.31],["Havana",-82.37,23.13],["Santo Domingo",-69.9,18.47],["Baku",49.86,40.4],["Accra",-0.22,5.55],["Kuwait City",47.98,29.37],["Sanaa",44.2,15.36],["Port-au-Prince",-72.34,18.54],["Bucharest",26.1,44.44],["Asunción",-57.64,-25.29],["Beirut",35.51,33.87],["Minsk",27.56,53.9],["Brussels",4.33,50.84],["Warsaw",21,52.25],["Rabat",-6.84,34.03],["Quito",-78.5,-0.21],["Antananarivo",47.51,-18.91],["Budapest",19.08,47.5],["Yaoundé",11.51,3.87],["Abuja",7.53,9.09],["Harare",31.04,-17.82],["Montevideo",-56.17,-34.86],["Bamako",-8,12.65],["Conakry",-13.68,9.53],["Phnom Penh",104.91,11.55],["Lomé",1.22,6.13],["Doha",51.53,25.29],["Kuala Lumpur",101.7,3.17],["Maputo",32.59,-25.95],["San Salvador",-89.2,13.71],["Kampala",32.58,0.32],["Brazzaville",15.28,-4.26],["Lusaka",28.28,-15.41],["San José",-84.09,9.94],["Panama City",-79.53,8.97],["Stockholm",18.1,59.35],["Sofia",23.31,42.69],["Prague",14.46,50.09],["Ouagadougou",-1.53,12.37],["Ottawa",-75.7,45.42],["Helsinki",24.93,60.18],["Yerevan",44.51,40.18],["Mogadishu",45.36,2.07],["Tbilisi",44.79,41.73],["Belgrade",20.47,44.82],["Dushanbe",68.77,38.56],["København",12.56,55.68],["Amman",35.93,31.95],["Dublin",-6.25,53.34],["Monrovia",-10.8,6.31],["Amsterdam",4.91,52.35],["Jerusalem",35.21,31.78],["Guatemala City",-90.53,14.62],["N'Djamena",15.05,12.12],["Tegucigalpa",-87.22,14.1],["Kingston",-76.77,17.98],["Naypyidaw (Burma)",96.12,19.77],["Djibouti",43.15,11.6],["Managua",-86.27,12.15],["Niamey",2.11,13.52],["Tirana",19.82,41.33],["Kathmandu (Nepal)",85.31,27.72],["Ulaanbaatar",106.91,47.92],["Kigali",30.06,-1.95],["Bishkek",74.58,42.88],["Oslo",10.75,59.92],["Bangui",18.56,4.37],["Freetown",-13.24,8.47],["Islamabad",73.16,33.7],["Cotonou",2.52,6.4],["Vientiane",102.6,17.97],["Riga",24.1,56.95],["Nouakchott",-15.98,18.09],["Muscat",58.59,23.61],["Ashgabat",58.38,37.95],["Zagreb",16,45.8],["Sarajevo",18.38,43.85],["Chișinău",28.86,47.01],["Lilongwe",33.78,-13.98],["Asmara",38.93,15.33],["Abu Dhabi",54.37,24.47],["Port Louis",57.5,-20.17],["Libreville",9.46,0.39],["Manama",50.58,26.24],["Vilnius",25.32,54.68],["Skopje",21.43,42],["Hargeisa",44.07,9.56],["Pristina",21.17,42.67],["Bloemfontein",26.23,-29.12],["Bratislava",17.12,48.15],["Bissau",-15.6,11.87],["Tallinn",24.73,59.43],["Wellington",174.78,-41.3],["Valletta",14.51,35.9],["Maseru",27.48,-29.32],["Nur-Sultan",71.43,51.18],["Bujumbura",29.36,-3.38],["Canberra",149.13,-35.28],["New Delhi",77.2,28.6],["Ljubljana",14.51,46.06],["Bandar Seri Begawan",114.93,4.88],["Port-of-Spain",-61.52,10.65],["Port Moresby",147.19,-9.46],["Bern",7.47,46.92],["Windhoek",17.08,-22.57],["Georgetown",-58.17,6.8],["Paramaribo",-55.17,5.84],["Dili",125.58,-8.56],["Nassau",-77.35,25.08],["Sucre",-65.26,-19.04],["Nicosia",33.37,35.17],["Colombo",79.86,6.93],["Gaborone",25.91,-24.65],["Yamoussoukro",-5.28,6.82],["Bridgetown",-59.62,13.1],["Suva",178.44,-18.13],["Reykjavík",-21.95,64.15],["Malabo",8.78,3.75],["Podgorica",19.27,42.47],["Moroni",43.24,-11.7],["Jolo (Sulu)",121,6.05],["Praia",-23.52,14.92],["Malé",73.5,4.17],["Luxembourg",6.13,49.61],["Thimphu",89.64,27.47],["Mbabane",31.13,-26.32],["São Tomé",6.73,0.33],["Honiara",159.95,-9.44],["Apia",-171.74,-13.84],["Andorra",1.52,42.5],["Kingstown",-61.21,13.15],["Port Vila",168.32,-17.73],["Banjul",-16.59,13.45],["Nuku'alofa",-175.22,-21.14],["Castries",-61,14],["Monaco",7.41,43.74],["Vaduz",9.52,47.13],["Saint John's",-61.85,17.12],["Saint George's",-61.74,12.05],["Victoria",55.45,-4.62],["San Marino",12.44,43.94],["Tarawa",173.02,1.34],["Majuro",171.38,7.1],["Roseau",-61.39,15.3],["Basseterre",-62.72,17.3],["Belmopan",-88.77,17.25],["Melekeok",134.63,7.49],["Funafuti",179.22,-8.52],["Palikir",158.15,6.92],["Vatican City",12.45,41.9]];
+
+  /* ── zoom ── 7 levels; level === scale factor (px/deg = 2*ZOOM). Level 7 makes
+     ~50° of longitude (≈ Europe) fill the 720px canvas. Zoom is NOT persisted. */
+  var ZOOM = 1, cx = 360, cy = 180;                 // view center in world px (2px/deg)
+  var POINT_LAID = localStorage.getItem('nsw_tile') !== null;
+  var zoomSlider = document.getElementById('zoomSlider'),
+      zVal       = document.getElementById('zoomValue'),
+      zoomWrap   = document.getElementById('zoomWrap');
+
+  function w2s(wx, wy) { return [ (wx - cx) * ZOOM + 360, (wy - cy) * ZOOM + 180 ]; }
+  function s2w(sx, sy) { return [ (sx - 360) / ZOOM + cx, (sy - 180) / ZOOM + cy ]; }
+  function clampCenter() {
+    if (ZOOM <= 1) { cx = 360; cy = 180; return; }
+    var hw = 360 / ZOOM, hh = 180 / ZOOM;
+    cx = Math.min(720 - hw, Math.max(hw, cx));
+    cy = Math.min(360 - hh, Math.max(hh, cy));
+  }
+  function setZoomUI() { if (zVal) zVal.textContent = ZOOM; if (zoomSlider) zoomSlider.value = ZOOM; }
+  function zoomAt(nz, fx, fy) {                       // zoom around a screen focus (wheel / pinch)
+    nz = Math.min(7, Math.max(1, nz));
+    if (nz === ZOOM) return;
+    if (fx == null) { fx = 360; fy = 180; }
+    var wpt = s2w(fx, fy);
+    ZOOM = nz;
+    cx = wpt[0] - (fx - 360) / ZOOM;
+    cy = wpt[1] - (fy - 180) / ZOOM;
+    clampCenter(); setZoomUI(); draw();
+  }
+  function zoomToPoint(nz) {                          // zoom centered on the laid point (slider)
+    nz = Math.min(7, Math.max(1, nz));
+    var p = TILE.split('_'), tlat = parseInt(p[0], 10), tlon = parseInt(p[1], 10);
+    cx = (tlon + 0.5 + 180) * 2; cy = (90 - (tlat + 0.5)) * 2;
+    ZOOM = nz; clampCenter(); setZoomUI(); draw();
+  }
+  function setPointLaid() {
+    POINT_LAID = true;
+    if (zoomSlider) zoomSlider.disabled = false;
+    if (zoomWrap) zoomWrap.classList.remove('locked');
+  }
+
   function load() {
     var t = localStorage.getItem('nsw_tile'),
         r = localStorage.getItem('nsw_radius'),
@@ -688,36 +744,97 @@ body,html{margin:0;height:100%;width:100%;font-family:Arial,Helvetica,sans-serif
   function sync() { slider.value = RADIUS; rVal.textContent = RADIUS; remote.checked = REMOTE; tileOut.textContent = TILE; }
 
   function draw() {
-    // base layer: the world map (fallback to ocean fill until the image decodes)
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#0e2a47'; ctx.fillRect(0, 0, 720, 360);   // ocean fallback / letterbox
+    ctx.save();
+    ctx.translate(360, 180); ctx.scale(ZOOM, ZOOM); ctx.translate(-cx, -cy);   // zoom+pan
     if (mapImg.complete && mapImg.naturalWidth) ctx.drawImage(mapImg, 0, 0, 720, 360);
-    else { ctx.fillStyle = '#0e2a47'; ctx.fillRect(0, 0, 720, 360); }
-    // faint graticule every 30 degrees, equator + prime meridian a touch brighter
-    ctx.strokeStyle = 'rgba(255,255,255,.10)'; ctx.lineWidth = 1;
+    // faint graticule every 30°, equator + prime meridian a touch brighter (kept ~1px via /ZOOM)
+    ctx.lineWidth = 1 / ZOOM; ctx.strokeStyle = 'rgba(255,255,255,.10)';
     for (var lat = -60; lat <= 60; lat += 30) { var y = (90 - lat) * 2; ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(720, y); ctx.stroke(); }
     for (var lon = -150; lon <= 150; lon += 30) { var x = (lon + 180) * 2; ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, 360); ctx.stroke(); }
     ctx.strokeStyle = 'rgba(255,255,255,.18)';
     ctx.beginPath(); ctx.moveTo(0, 180); ctx.lineTo(720, 180); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(360, 0); ctx.lineTo(360, 360); ctx.stroke();
-    // selected tile + radius ring
+    // selected tile + radius ring (world coords → scale with zoom)
     var p = TILE.split('_'), sLat = parseInt(p[0], 10), sLon = parseInt(p[1], 10);
     var x0 = (sLon + 180) * 2, y0 = (90 - sLat - 1) * 2;
     ctx.fillStyle = 'rgba(255,215,0,.85)'; ctx.fillRect(x0, y0, 2, 2);
-    ctx.strokeStyle = 'gold'; ctx.lineWidth = 1.5; ctx.strokeRect(x0 - 1, y0 - 1, 4, 4);
-    if (RADIUS > 1) { ctx.strokeStyle = 'rgba(255,215,0,.5)'; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(x0 + 1, y0 + 1, RADIUS * 2, 0, Math.PI * 2); ctx.stroke(); }
+    ctx.strokeStyle = 'gold'; ctx.lineWidth = 1.5 / ZOOM; ctx.strokeRect(x0, y0, 2, 2);
+    if (RADIUS > 1) { ctx.strokeStyle = 'rgba(255,215,0,.5)'; ctx.lineWidth = 1 / ZOOM; ctx.beginPath(); ctx.arc(x0 + 1, y0 + 1, RADIUS * 2, 0, Math.PI * 2); ctx.stroke(); }
+    ctx.restore();
+    if (ZOOM > 1) drawCapitals();
+  }
+  /* black 1°×1° dots on capitals with constant-size labels; only when zoomed in.
+     Bigger capitals come first, so they win label space when labels would collide. */
+  function drawCapitals() {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    var dot = Math.max(3, 2 * ZOOM);
+    ctx.font = '9px Arial'; ctx.textBaseline = 'middle';
+    var placed = [];
+    function hit(x, y, w, h) {
+      for (var j = 0; j < placed.length; j++) { var q = placed[j];
+        if (x < q.x + q.w && x + w > q.x && y < q.y + q.h && y + h > q.y) return true; }
+      return false;
+    }
+    for (var i = 0; i < CAPITALS.length; i++) {
+      var c = CAPITALS[i], s = w2s((c[1] + 180) * 2, (90 - c[2]) * 2);
+      if (s[0] < -30 || s[0] > 750 || s[1] < -10 || s[1] > 370) continue;   // cull off-screen
+      ctx.fillStyle = '#000'; ctx.fillRect(s[0] - dot / 2, s[1] - dot / 2, dot, dot);
+      var tx = s[0] + dot / 2 + 2, ty = s[1], tw = ctx.measureText(c[0]).width;
+      if (!hit(tx, ty - 5, tw, 10)) {
+        ctx.lineWidth = 2.5; ctx.strokeStyle = 'rgba(0,0,0,.85)'; ctx.strokeText(c[0], tx, ty);
+        ctx.fillStyle = '#fff'; ctx.fillText(c[0], tx, ty);
+        placed.push({ x: tx, y: ty - 5, w: tw, h: 10 });
+      }
+    }
   }
   function tileAt(e) {
     var rect = canvas.getBoundingClientRect();
     var mx = (e.clientX - rect.left) * (canvas.width / rect.width);
     var my = (e.clientY - rect.top) * (canvas.height / rect.height);
-    var lon = Math.max(-180, Math.min(179, Math.floor(mx / 2) - 180));
-    var lat = Math.max(-90, Math.min(89, 89 - Math.floor(my / 2)));
+    var w = s2w(mx, my);                               // screen → world px (honours zoom/pan)
+    var lon = Math.max(-180, Math.min(179, Math.floor(w[0] / 2) - 180));
+    var lat = Math.max(-90, Math.min(89, 89 - Math.floor(w[1] / 2)));
     return lat + '_' + lon;
   }
 
-  canvas.addEventListener('click', function (e) { TILE = tileAt(e); save(); draw(); });
+  canvas.addEventListener('click', function (e) { TILE = tileAt(e); setPointLaid(); save(); draw(); });
   slider.addEventListener('input', function () { RADIUS = parseInt(this.value, 10); rVal.textContent = RADIUS; draw(); save(); });
   remote.addEventListener('change', function () { REMOTE = this.checked; save(); });
   toggle.addEventListener('change', function () { if (this.checked) draw(); });
+
+  /* zoom — mouse wheel, around the cursor */
+  canvas.addEventListener('wheel', function (e) {
+    e.preventDefault();
+    var rect = canvas.getBoundingClientRect();
+    var fx = (e.clientX - rect.left) * (canvas.width / rect.width);
+    var fy = (e.clientY - rect.top) * (canvas.height / rect.height);
+    zoomAt(ZOOM + (e.deltaY < 0 ? 1 : -1), fx, fy);
+  }, { passive: false });
+
+  /* zoom — two-finger pinch, around the midpoint */
+  var pinchDist = 0, pinchZoom = 1;
+  function touchPair(t) {
+    var rect = canvas.getBoundingClientRect(), kx = canvas.width / rect.width, ky = canvas.height / rect.height;
+    var ax = (t[0].clientX - rect.left) * kx, ay = (t[0].clientY - rect.top) * ky,
+        bx = (t[1].clientX - rect.left) * kx, by = (t[1].clientY - rect.top) * ky;
+    return { d: Math.hypot(bx - ax, by - ay) || 1, mx: (ax + bx) / 2, my: (ay + by) / 2 };
+  }
+  canvas.addEventListener('touchstart', function (e) {
+    if (e.touches.length === 2) { var p = touchPair(e.touches); pinchDist = p.d; pinchZoom = ZOOM; }
+  }, { passive: true });
+  canvas.addEventListener('touchmove', function (e) {
+    if (e.touches.length === 2) { e.preventDefault(); var p = touchPair(e.touches);
+      zoomAt(Math.round(pinchZoom * (p.d / pinchDist)), p.mx, p.my); }
+  }, { passive: false });
+
+  /* zoom — slider (needs a laid point; zooms around it) */
+  if (zoomSlider) zoomSlider.addEventListener('input', function () {
+    if (!POINT_LAID) { this.value = ZOOM; return; }
+    zoomToPoint(parseInt(this.value, 10));
+  });
+  if (POINT_LAID) setPointLaid();
 
   load(); draw();
 
